@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Browser multi-hop trade route optimizer for Elite: Dangerous, inspired by Trade Dangerous.">
+<title>Trade Dangerous — Web</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">TD</span>
+      <div class="brand-text">
+        <h1>Trade Dangerous <span class="web">/ web</span></h1>
+        <p id="dataStamp" class="data-stamp">loading dataset…</p>
+      </div>
+    </div>
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="run">Route planner</button>
+      <button class="tab-btn" data-tab="quick">Quick trade</button>
+      <button class="tab-btn" data-tab="about">About this data</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="tab-run" class="panel active">
+      <form id="runForm" class="controls">
+        <div class="field">
+          <label for="startStation">Starting station</label>
+          <input id="startStation" name="startStation" placeholder="Type system or station name…" required autocomplete="off">
+          <p class="field-hint">Type any system or station name from the current market snapshot (autocomplete). Missing a station? Search <a href="https://inara.cz/elite/stations/" target="_blank" rel="noopener">Inara</a> — after the data refresh Action runs, stations with markets show up here.</p>
+        </div>
+
+        <div class="grid2">
+          <div class="field">
+            <label for="credits">Credits</label>
+            <input type="number" id="credits" name="credits" min="0" step="1000" value="100000" required>
+          </div>
+          <div class="field">
+            <label for="insurance">Insurance reserve</label>
+            <input type="number" id="insurance" name="insurance" min="0" step="1000" value="10000">
+          </div>
+          <div class="field">
+            <label for="capacity">Cargo capacity (t)</label>
+            <input type="number" id="capacity" name="capacity" min="1" step="1" value="64" required>
+          </div>
+          <div class="field">
+            <label for="lyPer">Jump range (ly)</label>
+            <input type="number" id="lyPer" name="lyPer" min="1" step="0.1" value="20" required>
+          </div>
+          <div class="field">
+            <label for="jumpsPer">Max jumps between hops</label>
+            <input type="number" id="jumpsPer" name="jumpsPer" min="0" step="1" value="2">
+          </div>
+          <div class="field">
+            <label for="hops">Trade hops</label>
+            <input type="number" id="hops" name="hops" min="1" max="12" step="1" value="4">
+          </div>
+        </div>
+
+        <div class="grid2">
+          <div class="field">
+            <label for="towardSystem">Head toward system <span class="optional">optional</span></label>
+            <input type="text" id="towardSystem" name="towardSystem" placeholder="e.g. Lave">
+          </div>
+          <div class="field">
+            <label class="checkbox">
+              <input type="checkbox" id="loop" name="loop">
+              Loop back to start
+            </label>
+            <label class="checkbox">
+              <input type="checkbox" id="noRevisit" name="noRevisit" checked>
+              Never visit the same station twice
+            </label>
+          </div>
+          <div class="field">
+            <label for="avoidSystems">Avoid systems <span class="optional">comma-separated</span></label>
+            <input type="text" id="avoidSystems" name="avoidSystems" placeholder="e.g. Robigo, Sothis">
+          </div>
+          <div class="field">
+            <label for="avoidCommodities">Avoid commodities <span class="optional">comma-separated</span></label>
+            <input type="text" id="avoidCommodities" name="avoidCommodities" placeholder="e.g. Slaves">
+          </div>
+        </div>
+
+        <details class="advanced">
+          <summary>Advanced</summary>
+          <div class="grid2">
+            <div class="field">
+              <label for="minProfit">Min profit / unit (cr)</label>
+              <input type="number" id="minProfit" name="minProfit" min="0" step="1" value="1">
+            </div>
+            <div class="field">
+              <label for="distancePenalty">Distance penalty</label>
+              <input type="range" id="distancePenalty" name="distancePenalty" min="0" max="0.3" step="0.01" value="0.05">
+            </div>
+            <div class="field">
+              <label for="beamWidth">Search width (quality vs speed)</label>
+              <input type="range" id="beamWidth" name="beamWidth" min="2" max="16" step="1" value="6">
+            </div>
+          </div>
+        </details>
+
+        <button type="submit" class="primary">Plot best routes</button>
+      </form>
+
+      <div id="runStatus" class="status"></div>
+      <div id="runResults" class="results"></div>
+    </section>
+
+    <section id="tab-quick" class="panel">
+      <form id="quickForm" class="controls">
+        <div class="grid2">
+          <div class="field">
+            <label for="qFrom">Buy at</label>
+            <input id="qFrom" name="qFrom" placeholder="Type system or station name…" required autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="qTo">Sell at</label>
+            <input id="qTo" name="qTo" placeholder="Type system or station name…" required autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="qCredits">Credits</label>
+            <input type="number" id="qCredits" name="qCredits" min="0" step="1000" value="100000" required>
+          </div>
+          <div class="field">
+            <label for="qCapacity">Cargo capacity (t)</label>
+            <input type="number" id="qCapacity" name="qCapacity" min="1" step="1" value="64" required>
+          </div>
+        </div>
+        <button type="submit" class="primary">Find best load</button>
+      </form>
+      <div id="quickResults" class="results"></div>
+    </section>
+
+    <section id="tab-about" class="panel">
+      <div class="about">
+        <h2>Where this data comes from</h2>
+        <p>
+          This is a static site. The route optimizer runs entirely in your browser against
+          <code>data/trade-data.json</code>. A GitHub Actions workflow rebuilds that file on a
+          schedule from public dumps and commits it back, so the live site stays reasonably fresh.
+        </p>
+        <p><strong>Supported bulk sources</strong> (choose when you trigger the workflow, or set
+          <code>TD_SOURCE</code>):</p>
+        <ul>
+          <li><strong>Spansh</strong> — default. Full station + market dump from
+            <a href="https://spansh.co.uk/dumps" target="_blank" rel="noopener">spansh.co.uk/dumps</a>.</li>
+          <li><strong>EDDBlink / Tromador</strong> — the same feed Trade Dangerous recommends
+            (<a href="https://elite.tromador.com/" target="_blank" rel="noopener">elite.tromador.com</a>).
+            Often smaller and better for frequent refreshes.</li>
+        </ul>
+        <p>
+          <strong>Inara</strong> does not publish a bulk market dump or an open bulk API suitable
+          for offline routing (only a rate-limited CMDR/profile API). Instead, every station in the
+          route results links to Inara so you can cross-check live prices and station details there.
+        </p>
+        <p id="aboutStamp"></p>
+        <p>
+          Demo data ships in the repo so the site works the moment you open it, before the first
+          scheduled rebuild finishes.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>Unofficial fan tool inspired by <a href="https://github.com/eyeonus/Trade-Dangerous" target="_blank" rel="noopener">Trade Dangerous</a>.
+    Not affiliated with Frontier Developments, Spansh, Inara, or Tromador.</p>
+  </footer>
+</div>
+
+<script src="js/optimizer.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
