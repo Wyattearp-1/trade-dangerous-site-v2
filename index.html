@@ -30,8 +30,8 @@
       <form id="runForm" class="controls">
         <div class="field">
           <label for="startStation">Starting station</label>
-          <input list="stationList" id="startStation" name="startStation" placeholder="System/Station" required autocomplete="off">
-          <datalist id="stationList"></datalist>
+          <input id="startStation" name="startStation" placeholder="Type system or station name…" required autocomplete="off">
+          <p class="field-hint">Type any system or station name from the current market snapshot (autocomplete). Missing a station? Search <a href="https://inara.cz/elite/stations/" target="_blank" rel="noopener">Inara</a> — after the data refresh Action runs, stations with markets show up here.</p>
         </div>
 
         <div class="grid2">
@@ -116,11 +116,11 @@
         <div class="grid2">
           <div class="field">
             <label for="qFrom">Buy at</label>
-            <input list="stationList" id="qFrom" name="qFrom" placeholder="System/Station" required autocomplete="off">
+            <input id="qFrom" name="qFrom" placeholder="Type system or station name…" required autocomplete="off">
           </div>
           <div class="field">
             <label for="qTo">Sell at</label>
-            <input list="stationList" id="qTo" name="qTo" placeholder="System/Station" required autocomplete="off">
+            <input id="qTo" name="qTo" placeholder="Type system or station name…" required autocomplete="off">
           </div>
           <div class="field">
             <label for="qCredits">Credits</label>
