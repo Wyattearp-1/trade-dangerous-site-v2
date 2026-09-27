@@ -24,8 +24,13 @@
   }
 
   function stationLabel(key) {
-    const link = `<a class="station-link" href="${inaraStationUrl(key)}" target="_blank" rel="noopener" title="Open on Inara">Inara ↗</a>`;
-    return `${key}${link}`;
+    return key || '';
+  }
+
+  function stationLinkHtml(key) {
+    const label = escapeHtml(stationLabel(key));
+    const url = inaraStationUrl(key);
+    return `<a class="station-link" href="${url}" target="_blank" rel="noopener" title="Open on Inara">${label}</a>`;
   }
 
   function indexStations() {
@@ -397,10 +402,10 @@
         const toLink = inaraStationUrl(h.to.key);
         hop.innerHTML = `
           <div class="hop-route">
-            <span>
-              <a href="${fromLink}" target="_blank" rel="noopener">${escapeHtml(stationLabel(h.from.key))}</a>
-              →
-              <a href="${toLink}" target="_blank" rel="noopener">${escapeHtml(stationLabel(h.to.key))}</a>
+            <span class="hop-stations">
+              ${stationLinkHtml(h.from.key)}
+              <span class="hop-arrow">→</span>
+              ${stationLinkHtml(h.to.key)}
             </span>
             <span class="dist">${h.distLy.toFixed(1)} ly</span>
             <span class="hop-profit">+${fmtCr(h.profit)}</span>
@@ -518,7 +523,7 @@
 
         container.innerHTML = `
           <div class="route-card">
-            <div class="route-card-head"><span>${stationLabel(fromKey)} → ${stationLabel(toKey)}</span><span class="total">+${fmtCr(totalProfit)}</span></div>
+            <div class="route-card-head"><span>${stationLinkHtml(fromKey)} → ${stationLinkHtml(toKey)}</span><span class="total">+${fmtCr(totalProfit)}</span></div>
             <div class="hop">
               <table class="load-table">
                 <thead><tr><th>Commodity</th><th class="num">Units</th><th class="num">Buy</th><th class="num">Sell</th><th class="num">Profit</th></tr></thead>
