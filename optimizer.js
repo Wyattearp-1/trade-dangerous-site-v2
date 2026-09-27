@@ -215,26 +215,42 @@ function findRoutes(data, opts) {
       const here = partial.path[partial.path.length - 1].station;
       const spendable = Math.max(0, partial.credits - (opts.insurance || 0));
 
-      let nearby = neighboursWithin(here.pos, hopRadius)
-        .filter(n => n.station.key !== here.key)
-        .filter(n => !opts.noRevisit || !partial.visited.has(n.station.key));
+      let nearby;
 
-      // If this is the final hop and looping is requested, force-consider
-      // the start station even if it'd otherwise be filtered by noRevisit.
-      if (isLastHop && opts.loop && here.key !== start.key) {
+      // Final hop + loop: MUST return to the starting station (not just prefer it).
+      if (isLastHop && opts.loop) {
+        if (here.key === start.key) {
+          // Already at start — keep this partial as a finished route (no extra hop).
+          nextBeam.push({
+            path: partial.path,
+            credits: partial.credits,
+            visited: partial.visited,
+            totalProfit: partial.totalProfit,
+            score: partial.totalProfit,
+          });
+          continue;
+        }
         const d = dist3(here.pos, start.pos);
-        if (d <= hopRadius) nearby.push({ station: start, dist: d });
-      }
+        if (d > hopRadius) {
+          // Cannot reach start within jump budget — drop this partial for the final hop.
+          continue;
+        }
+        nearby = [{ station: start, dist: d }];
+      } else {
+        nearby = neighboursWithin(here.pos, hopRadius)
+          .filter(n => n.station.key !== here.key)
+          .filter(n => !opts.noRevisit || !partial.visited.has(n.station.key));
 
-      // Rank neighbours cheaply before doing the (more expensive) load calc.
-      nearby.sort((a, b) => {
-        let sa = 0, sb = 0;
-        if (towardPos) { sa -= dist3(a.station.pos, towardPos); sb -= dist3(b.station.pos, towardPos); }
-        sa -= a.dist * (opts.distancePenalty || 0.05);
-        sb -= b.dist * (opts.distancePenalty || 0.05);
-        return sb - sa;
-      });
-      nearby = nearby.slice(0, candidatesPerHop);
+        // Rank neighbours cheaply before doing the (more expensive) load calc.
+        nearby.sort((a, b) => {
+          let sa = 0, sb = 0;
+          if (towardPos) { sa -= dist3(a.station.pos, towardPos); sb -= dist3(b.station.pos, towardPos); }
+          sa -= a.dist * (opts.distancePenalty || 0.05);
+          sb -= b.dist * (opts.distancePenalty || 0.05);
+          return sb - sa;
+        });
+        nearby = nearby.slice(0, candidatesPerHop);
+      }
 
       for (const { station: dest, dist } of nearby) {
         const { load, totalProfit } = bestLoad(
