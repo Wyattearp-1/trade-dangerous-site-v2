@@ -171,17 +171,154 @@ def extract_market_spansh(raw: dict):
     return out or None
 
 
-def build_from_spansh(url: str, max_stations):
+def build_from_spansh_api(max_stations):
+    """Fast path: Spansh stations/search API by distance rings from Sol (no multi-GB dump)."""
+    max_ly = float(os.environ.get("TD_MAX_LY", "800"))
+    api = "https://spansh.co.uk/api/stations/search"
+    systems: dict = {}
+    stations: dict = {}
+    t0 = time.time()
+    log(f"Spansh API: fetching market stations within {max_ly} ly of Sol…")
+
+    def post(filters, page=0, size=100):
+        body = json.dumps({
+            "filters": filters,
+            "sort": [{"distance": {"direction": "asc"}}],
+            "size": size,
+            "page": page,
+        }).encode()
+        req = urllib.request.Request(
+            api,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "trade-dangerous-web/2.3",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            return json.loads(resp.read().decode())
+
+    def ingest(results):
+        n = 0
+        for r in results:
+            name = (r.get("name") or "").strip()
+            sys_name = (r.get("system_name") or "").strip()
+            if not name or not sys_name:
+                continue
+            market_raw = r.get("market") or []
+            if not market_raw:
+                continue
+            mkt = {}
+            for c in market_raw:
+                cname = (c.get("commodity") or c.get("name") or "").strip()
+                if not cname:
+                    continue
+                buy = int(c.get("buy_price") or c.get("buyPrice") or 0)
+                sell = int(c.get("sell_price") or c.get("sellPrice") or 0)
+                supply = int(c.get("supply") or 0)
+                demand = int(c.get("demand") or 0)
+                if not is_station_market_commodity(cname, buy, sell, supply, demand):
+                    continue
+                mkt[cname.upper()] = {
+                    "buy": buy, "sell": sell, "supply": supply, "demand": demand,
+                }
+            if not mkt:
+                continue
+            x, y, z = r.get("system_x"), r.get("system_y"), r.get("system_z")
+            if x is None:
+                continue
+            sys_key = sys_name.upper()
+            st_key = f"{sys_key}/{name.upper()}"
+            systems[sys_key] = {
+                "x": round(float(x), 2),
+                "y": round(float(y), 2),
+                "z": round(float(z), 2),
+            }
+            pad = "L" if r.get("has_large_pad") or (r.get("large_pads") or 0) > 0 else "M"
+            stations[st_key] = {
+                "system": sys_key,
+                "pad": pad,
+                "distLs": int(r.get("distance_to_arrival") or 0),
+                "planetary": bool(r.get("is_planetary")),
+                "market": mkt,
+            }
+            n += 1
+        return n
+
+    # Named anchors so Herbert Dock / popular hubs always appear
+    for q in ("Herbert Dock", "Jameson Memorial", "Abraham Lincoln", "Lave Station"):
+        try:
+            data = post({"name": {"value": q}, "has_market": {"value": True}}, size=20)
+            ingest(data.get("results") or [])
+        except Exception as e:
+            log(f"  anchor {q}: {e}")
+        time.sleep(0.15)
+
+    # Distance rings from Sol (API sorts by distance)
+    rings = []
+    step = 100
+    lo = 0.0
+    while lo < max_ly:
+        hi = min(lo + step, max_ly)
+        rings.append((lo, hi))
+        lo = hi
+
+    for lo, hi in rings:
+        if max_stations and len(stations) >= max_stations:
+            break
+        for page in range(40):
+            if max_stations and len(stations) >= max_stations:
+                break
+            try:
+                data = post({
+                    "has_market": {"value": True},
+                    "distance": {"min": str(int(lo)), "max": str(int(hi))},
+                }, page=page, size=100)
+            except Exception as e:
+                log(f"  ring {lo}-{hi} p{page}: {e}")
+                time.sleep(2)
+                continue
+            results = data.get("results") or []
+            if not results:
+                break
+            ingest(results)
+            if page % 5 == 0:
+                log(f"  ring {lo:.0f}-{hi:.0f} ly p{page}: {len(stations)} stations ({time.time() - t0:.0f}s)")
+            time.sleep(0.12)
+
+    if max_stations and len(stations) > max_stations:
+        # Keep closest to Sol
+        ranked = sorted(
+            stations.items(),
+            key=lambda kv: (
+                systems[kv[1]["system"]]["x"] ** 2
+                + systems[kv[1]["system"]]["y"] ** 2
+                + systems[kv[1]["system"]]["z"] ** 2
+            ),
+        )[:max_stations]
+        stations = dict(ranked)
+        used = {v["system"] for v in stations.values()}
+        systems = {k: v for k, v in systems.items() if k in used}
+
+    log(
+        f"Spansh API: kept {len(stations)} stations in {len(systems)} systems "
+        f"({time.time() - t0:.0f}s, max_ly={max_ly})."
+    )
+    return systems, stations, "spansh-api"
+
+
+def build_from_spansh_dump(url: str, max_stations):
+    """Slow path: full galaxy_stations.json.gz dump (multi-GB download)."""
     if ijson is None:
-        raise SystemExit("ijson is required for Spansh source: pip install ijson")
+        raise SystemExit("ijson is required for Spansh dump mode: pip install ijson")
 
     max_ly = float(os.environ.get("TD_MAX_LY", "800"))
-    # Collect candidates as (dist_sol, key, system_coords, station_dict) then keep closest
     candidates = []
     skipped = 0
     seen = 0
     t0 = time.time()
-    log(f"Spansh: scanning dump (prefer systems within {max_ly} ly of Sol)…")
+    log(f"Spansh dump: downloading/scanning (within {max_ly} ly of Sol)…")
 
     with open_spansh(url) as fh:
         for obj in ijson.items(fh, "item"):
@@ -245,9 +382,8 @@ def build_from_spansh(url: str, max_stations):
                 candidates.append((dist_sol, key, sys_key, sys_coords, entry))
                 seen += 1
                 if seen % 10000 == 0:
-                    log(f"  …scanned {seen} market stations within {max_ly} ly ({time.time() - t0:.0f}s)")
+                    log(f"  …scanned {seen} ({time.time() - t0:.0f}s)")
 
-    # Closest to Sol first so the bubble (Wolf 906, etc.) is never dropped
     candidates.sort(key=lambda c: (c[0], c[1]))
     if max_stations and len(candidates) > max_stations:
         candidates = candidates[:max_stations]
@@ -259,198 +395,141 @@ def build_from_spansh(url: str, max_stations):
         stations[key] = entry
 
     log(
-        f"Spansh: kept {len(stations)} stations in {len(systems)} systems "
-        f"(scanned {seen}, skipped empty market {skipped}, max_ly={max_ly})."
+        f"Spansh dump: kept {len(stations)} stations in {len(systems)} systems "
+        f"(scanned {seen}, skipped {skipped}, {time.time() - t0:.0f}s)."
     )
     return systems, stations, url
 
 
+def build_from_spansh(url: str, max_stations):
+    """Default: fast API. Set TD_SPANSH_MODE=dump for the full multi-GB dump."""
+    mode = (os.environ.get("TD_SPANSH_MODE") or "api").strip().lower()
+    if mode in ("dump", "full", "gz"):
+        return build_from_spansh_dump(url, max_stations)
+    return build_from_spansh_api(max_stations)
+
+
+
+
+def download_text(url: str, timeout: int = 300) -> str:
+    """Download a text file (CSV/JSONL) from a URL."""
+    log(f"  downloading {url}")
+    headers = {"User-Agent": "trade-dangerous-web/2.2"}
+    if requests is not None:
+        r = requests.get(url, headers=headers, timeout=timeout)
+        r.raise_for_status()
+        r.encoding = r.apparent_encoding or "utf-8"
+        return r.text
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    return raw.decode("utf-8", errors="replace")
+
+
+def download_bytes(url: str, timeout: int = 300) -> bytes:
+    headers = {"User-Agent": "trade-dangerous-web/2.2"}
+    if requests is not None:
+        r = requests.get(url, headers=headers, timeout=timeout)
+        r.raise_for_status()
+        return r.content
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
 
 def build_from_eddblink(max_stations):
     """
-    Build from Tromador's EDDB-style dumps:
-      systems_populated.jsonl  (or systems.csv)
-      stations.jsonl           (or stations.csv)
-      listings.csv             (commodity prices)
-    Falls back across common filenames.
+    Build from Tromador EDDBlink files:
+      System.csv, Station.csv, listings.csv / listings-live.csv, Item.csv
+    https://elite.tromador.com/files/
     """
     base = EDDBLINK_BASE
+    max_ly = float(os.environ.get("TD_MAX_LY", "800"))
+
+    # --- systems: id -> name/coords ---
     systems: dict = {}
-    stations: dict = {}
-    # station_id -> key for joining listings
-    id_to_key: dict = {}
-
-    # --- systems ---
-    sys_loaded = False
-    for name in (
-        "systems_populated.jsonl",
-        "systems.jsonl",
-        "System.csv",
-        "systems.csv",
-    ):
-        try:
-            text = download_text(base + name)
-        except Exception as e:
-            log(f"  skip {name}: {e}")
+    system_by_id: dict = {}
+    text = download_text(base + "System.csv")
+    reader = csv.DictReader(io.StringIO(text))
+    for row in reader:
+        n = (row.get("name") or "").strip().strip("'")
+        if not n or n.startswith("$"):
             continue
-        if name.endswith(".jsonl"):
-            for line in text.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                n = (obj.get("name") or "").strip()
-                if not n:
-                    continue
-                coords = obj.get("coords") or {}
-                x = obj.get("x", coords.get("x"))
-                y = obj.get("y", coords.get("y"))
-                z = obj.get("z", coords.get("z"))
-                if x is None:
-                    continue
-                systems[n.upper()] = {
-                    "x": round(float(x), 2),
-                    "y": round(float(y), 2),
-                    "z": round(float(z), 2),
-                }
-            sys_loaded = True
-            log(f"  systems from {name}: {len(systems)}")
-            break
-        else:
-            # CSV
-            reader = csv.DictReader(io.StringIO(text))
-            for row in reader:
-                n = (row.get("name") or row.get("Name") or "").strip()
-                if not n:
-                    continue
-                try:
-                    systems[n.upper()] = {
-                        "x": round(float(row.get("x") or row.get("X") or 0), 2),
-                        "y": round(float(row.get("y") or row.get("Y") or 0), 2),
-                        "z": round(float(row.get("z") or row.get("Z") or 0), 2),
-                    }
-                except ValueError:
-                    continue
-            sys_loaded = True
-            log(f"  systems from {name}: {len(systems)}")
-            break
+        try:
+            x = float(row.get("pos_x") or row.get("x") or 0)
+            y = float(row.get("pos_y") or row.get("y") or 0)
+            z = float(row.get("pos_z") or row.get("z") or 0)
+        except ValueError:
+            continue
+        dist = (x * x + y * y + z * z) ** 0.5
+        if max_ly > 0 and dist > max_ly:
+            continue
+        sid = (row.get("unq:system_id") or row.get("system_id") or row.get("id") or "").strip()
+        key = n.upper()
+        systems[key] = {"x": round(x, 2), "y": round(y, 2), "z": round(z, 2)}
+        if sid:
+            system_by_id[sid] = key
+    log(f"  systems within {max_ly} ly: {len(systems)}")
 
-    if not sys_loaded:
-        raise SystemExit("Could not load any systems file from EDDBlink base")
+    if not systems:
+        raise SystemExit("Could not load systems from EDDBlink System.csv")
+
+    # --- commodities: id -> name ---
+    item_by_id: dict = {}
+    try:
+        text = download_text(base + "Item.csv")
+        for row in csv.DictReader(io.StringIO(text)):
+            iid = (row.get("unq:item_id") or row.get("item_id") or row.get("id") or "").strip()
+            name = (row.get("name") or "").strip().strip("'")
+            if iid and name:
+                item_by_id[iid] = name.upper()
+        log(f"  commodities: {len(item_by_id)}")
+    except Exception as e:
+        log(f"  warn Item.csv: {e}")
 
     # --- stations ---
-    st_loaded = False
-    for name in ("stations.jsonl", "Station.csv", "stations.csv"):
-        try:
-            text = download_text(base + name)
-        except Exception as e:
-            log(f"  skip {name}: {e}")
+    stations: dict = {}
+    id_to_key: dict = {}
+    text = download_text(base + "Station.csv")
+    # Station.csv is large (~100MB); stream by lines after header
+    reader = csv.DictReader(io.StringIO(text))
+    for row in reader:
+        st_name = (row.get("name") or "").strip().strip("'")
+        if not st_name or st_name.startswith("$"):
             continue
-        if name.endswith(".jsonl"):
-            for line in text.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                st_name = (obj.get("name") or "").strip()
-                sys_name = (
-                    (obj.get("systemName") or obj.get("system") or "")
-                    if not isinstance(obj.get("system"), dict)
-                    else (obj.get("system") or {}).get("name", "")
-                )
-                sys_name = (sys_name or "").strip()
-                if not st_name or not sys_name:
-                    continue
-                sys_key = sys_name.upper()
-                if sys_key not in systems:
-                    continue
-                key = f"{sys_key}/{st_name.upper()}"
-                pad = "L"
-                if obj.get("max_landing_pad_size") or obj.get("maxLandingPadSize"):
-                    s = str(
-                        obj.get("max_landing_pad_size")
-                        or obj.get("maxLandingPadSize")
-                    ).upper()
-                    pad = "L" if s.startswith("L") else "M"
-                elif obj.get("landingPads"):
-                    pad = pad_size_from_station(obj)
-                stations[key] = {
-                    "system": sys_key,
-                    "pad": pad,
-                    "distLs": int(
-                        obj.get("distance_to_star")
-                        or obj.get("distanceToArrival")
-                        or obj.get("distance")
-                        or 0
-                    ),
-                    "planetary": bool(
-                        obj.get("is_planetary")
-                        or obj.get("isPlanetary")
-                        or "planetary" in str(obj.get("type", "")).lower()
-                    ),
-                    "market": {},
-                }
-                sid = obj.get("id") or obj.get("market_id") or obj.get("marketId")
-                if sid is not None:
-                    id_to_key[str(sid)] = key
-            st_loaded = True
-            log(f"  stations from {name}: {len(stations)}")
-            break
-        else:
-            reader = csv.DictReader(io.StringIO(text))
-            for row in reader:
-                st_name = (row.get("name") or row.get("Name") or "").strip()
-                sys_name = (
-                    row.get("system_name")
-                    or row.get("systemName")
-                    or row.get("System")
-                    or ""
-                ).strip()
-                if not st_name or not sys_name:
-                    continue
-                sys_key = sys_name.upper()
-                if sys_key not in systems:
-                    continue
-                key = f"{sys_key}/{st_name.upper()}"
-                pad_raw = (
-                    row.get("max_landing_pad_size")
-                    or row.get("maxLandingPadSize")
-                    or "L"
-                )
-                pad = "L" if str(pad_raw).upper().startswith("L") else "M"
-                stations[key] = {
-                    "system": sys_key,
-                    "pad": pad,
-                    "distLs": int(
-                        float(
-                            row.get("distance_to_star")
-                            or row.get("distanceToStar")
-                            or 0
-                        )
-                    ),
-                    "planetary": str(
-                        row.get("is_planetary") or row.get("isPlanetary") or ""
-                    ).lower()
-                    in ("1", "true", "t", "yes"),
-                    "market": {},
-                }
-                sid = row.get("id") or row.get("station_id") or row.get("market_id")
-                if sid:
-                    id_to_key[str(sid)] = key
-            st_loaded = True
-            log(f"  stations from {name}: {len(stations)}")
-            break
+        # market flag: Y/N
+        has_market = str(row.get("market") or "").strip().strip("'").upper()
+        if has_market and has_market not in ("Y", "1", "TRUE", "T"):
+            continue
+        sys_id = (
+            row.get("system_id@System.system_id")
+            or row.get("system_id")
+            or ""
+        ).strip()
+        sys_key = system_by_id.get(sys_id)
+        if not sys_key:
+            continue
+        key = f"{sys_key}/{st_name.upper()}"
+        pad_raw = (row.get("max_pad_size") or row.get("max_landing_pad_size") or "M").strip().strip("'")
+        pad = "L" if str(pad_raw).upper().startswith("L") else "M"
+        try:
+            dist_ls = int(float(row.get("ls_from_star") or row.get("distance_to_star") or 0))
+        except ValueError:
+            dist_ls = 0
+        planetary = str(row.get("planetary") or "").strip().strip("'").upper() in ("Y", "1", "TRUE")
+        stations[key] = {
+            "system": sys_key,
+            "pad": pad,
+            "distLs": dist_ls,
+            "planetary": planetary,
+            "market": {},
+        }
+        sid = (row.get("unq:station_id") or row.get("station_id") or row.get("id") or "").strip()
+        if sid:
+            id_to_key[sid] = key
+    log(f"  stations with market flag: {len(stations)}")
 
-    if not st_loaded:
-        raise SystemExit("Could not load any stations file from EDDBlink base")
-
-    # --- listings (prices) ---
+    # --- listings (prefer live, then full) ---
     listings_loaded = False
     for name in ("listings-live.csv", "listings.csv"):
         try:
@@ -465,10 +544,8 @@ def build_from_eddblink(max_stations):
                 row.get("station_id")
                 or row.get("market_id")
                 or row.get("Station_id")
-                or row.get("id")
-            )
-            if sid is None:
-                continue
+                or ""
+            ).strip()
             key = id_to_key.get(str(sid))
             if not key or key not in stations:
                 continue
@@ -476,11 +553,12 @@ def build_from_eddblink(max_stations):
                 row.get("commodity_name")
                 or row.get("commodity")
                 or row.get("name")
-                or row.get("Commodity")
                 or ""
             ).strip()
             if not commodity:
-                # sometimes only commodity_id – skip without a name map
+                iid = (row.get("commodity_id") or row.get("item_id") or "").strip()
+                commodity = item_by_id.get(iid, "")
+            if not commodity:
                 continue
             try:
                 buy = int(float(row.get("buy_price") or row.get("buy") or 0))
@@ -498,31 +576,38 @@ def build_from_eddblink(max_stations):
                 "demand": demand,
             }
             n_rows += 1
-            if max_stations and len([s for s in stations.values() if s["market"]]) >= max_stations:
-                break
         log(f"  listings from {name}: {n_rows} price rows")
-        listings_loaded = True
-        if n_rows > 0:
+        listings_loaded = n_rows > 0
+        if listings_loaded:
             break
 
     if not listings_loaded:
         log("WARNING: no listings loaded – markets will be empty")
 
-    # drop stations with empty markets
     before = len(stations)
     stations = {k: v for k, v in stations.items() if v.get("market")}
-    log(f"EDDBlink: kept {len(stations)} stations with markets (dropped {before - len(stations)})")
+    log(f"  stations with prices: {len(stations)} (dropped {before - len(stations)} empty)")
 
-    # keep only systems that still have stations
     used = {v["system"] for v in stations.values()}
     systems = {k: v for k, v in systems.items() if k in used}
 
+    if max_stations and len(stations) > max_stations:
+        ranked = sorted(
+            stations.items(),
+            key=lambda kv: (
+                systems[kv[1]["system"]]["x"] ** 2
+                + systems[kv[1]["system"]]["y"] ** 2
+                + systems[kv[1]["system"]]["z"] ** 2
+            ),
+        )[:max_stations]
+        stations = dict(ranked)
+        used = {v["system"] for v in stations.values()}
+        systems = {k: v for k, v in systems.items() if k in used}
+
+    log(f"EDDBlink: kept {len(stations)} stations in {len(systems)} systems")
     return systems, stations, base
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def write_data(systems, stations, source_label, out_path: str, max_shard_bytes: int | None = None):
     if max_shard_bytes is None:
