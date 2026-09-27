@@ -103,6 +103,17 @@
     // exact case-insensitive key match
     const exact = STATION_KEYS.find(k => k.toUpperCase() === upper);
     if (exact) return exact;
+    // "Station Name [System]" style
+    const bracket = upper.match(/^(.*)\s*\[(.*)\]\s*$/);
+    if (bracket) {
+      const stn = bracket[1].trim();
+      const sys = bracket[2].trim();
+      const hit = STATION_KEYS.find(k => {
+        const parts = k.toUpperCase().split('/');
+        return parts[0] === sys && parts.slice(1).join('/') === stn;
+      });
+      if (hit) return hit;
+    }
     // unique station-name match (e.g. user typed only "Jameson Memorial")
     const byName = STATION_KEYS.filter(k => {
       const stn = k.includes('/') ? k.slice(k.indexOf('/') + 1) : k;
@@ -113,6 +124,10 @@
     if (BY_SYSTEM.has(upper) && BY_SYSTEM.get(upper).length === 1) {
       return BY_SYSTEM.get(upper)[0];
     }
+    // system/station partial: normalize spaces
+    const compact = upper.replace(/\s+/g, ' ');
+    const soft = STATION_KEYS.find(k => k.toUpperCase().replace(/\s+/g, ' ') === compact);
+    if (soft) return soft;
     return null;
   }
 
@@ -439,7 +454,7 @@
             hops: Number($('hops').value),
             loop: $('loop').checked,
             noRevisit: $('noRevisit').checked,
-            noPlanetary: $('noPlanetary') && $('noPlanetary').checked,
+            noPlanetary: !($('includeOdyssey') && $('includeOdyssey').checked),
             towardSystem: $('towardSystem').value.trim() || undefined,
             avoidSystems: splitList($('avoidSystems').value),
             avoidStations: splitList($('avoidStations') ? $('avoidStations').value : ''),

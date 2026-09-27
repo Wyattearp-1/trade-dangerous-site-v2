@@ -50,23 +50,31 @@ function prepStations(data, opts) {
   const avoidSystems = new Set((opts.avoidSystems || []).map(s => s.toUpperCase()));
   const avoidStations = new Set((opts.avoidStations || []).map(s => s.toUpperCase()));
   const avoidCommodities = new Set((opts.avoidCommodities || []).map(s => s.toUpperCase()));
+  const startKeyU = (opts.startKey || '').toUpperCase();
 
   const stations = [];
   for (const [key, st] of Object.entries(data.stations)) {
-    const sysName = st.system.toUpperCase();
-    if (avoidSystems.has(sysName)) continue;
-    if (avoidStations.size) {
-      const ku = key.toUpperCase();
-      const stationName = ku.includes('/') ? ku.split('/').slice(1).join('/') : ku;
-      if (avoidStations.has(ku) || avoidStations.has(stationName)) continue;
+    const sysName = (st.system || key.split('/')[0] || '').toUpperCase();
+    const ku = key.toUpperCase();
+    const isStart = startKeyU && ku === startKeyU;
+
+    // Never filter out the player's starting station
+    if (!isStart) {
+      if (avoidSystems.has(sysName)) continue;
+      if (avoidStations.size) {
+        const stationName = ku.includes('/') ? ku.split('/').slice(1).join('/') : ku;
+        if (avoidStations.has(ku) || avoidStations.has(stationName)) continue;
+      }
+      // Odyssey / planetary settlements
+      if (opts.noPlanetary && st.planetary) continue;
+      if (opts.maxStationLs > 0 && (st.distLs || 0) > opts.maxStationLs) continue;
+      // requirePad: 'L' = large only; 'M' = medium or large; 'any' = all
+      const req = opts.requirePad || opts.maxPadSize;
+      if (req === 'L' && st.pad !== 'L') continue;
+      if (req === 'M' && st.pad === 'S') continue;
     }
-    if (opts.noPlanetary && st.planetary) continue;
-    if (opts.maxStationLs > 0 && (st.distLs || 0) > opts.maxStationLs) continue;
-    // requirePad: 'L' = large only; 'M' = medium or large; 'any'/undefined = all
-    const req = opts.requirePad || opts.maxPadSize;
-    if (req === 'L' && st.pad !== 'L') continue;
-    if (req === 'M' && st.pad === 'S') continue;
-    const sys = data.systems[st.system];
+
+    const sys = data.systems[st.system] || data.systems[sysName];
     if (!sys) continue;
     stations.push({
       key,
@@ -75,6 +83,7 @@ function prepStations(data, opts) {
       pos: sys,
       pad: st.pad,
       distLs: st.distLs || 0,
+      planetary: !!st.planetary,
       market: st.market || {},
     });
   }
@@ -175,7 +184,14 @@ function findRoutes(data, opts) {
   const { stations, neighboursWithin, avoidCommodities } = prepStations(data, opts);
   const byKey = new Map(stations.map(s => [s.key, s]));
   const start = byKey.get(opts.startKey);
-  if (!start) throw new Error('Unknown starting station: ' + opts.startKey);
+  if (!start) {
+    const inData = !!(data.stations && data.stations[opts.startKey]);
+    throw new Error(
+      inData
+        ? ('Starting station was filtered out by options: ' + opts.startKey)
+        : ('Unknown starting station (not in market data): ' + opts.startKey)
+    );
+  }
 
   const hopRadius = Math.max(1, (opts.lyPer || 20) * (opts.jumpsPer || 2));
   const capacity = opts.capacity || 1;
