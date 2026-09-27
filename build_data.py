@@ -609,6 +609,72 @@ def build_from_eddblink(max_stations):
 
 
 
+
+def merge_anchor_stations(systems: dict, stations: dict) -> None:
+    """Ensure key bubble stations (e.g. Herbert Dock) are present via Spansh API."""
+    anchors = ["Herbert Dock", "Jameson Memorial", "Abraham Lincoln", "Hutton Orbital"]
+    url = "https://spansh.co.uk/api/stations/search"
+    for q in anchors:
+        try:
+            body = json.dumps({
+                "filters": {"name": {"value": q}},
+                "size": 10,
+                "page": 0,
+            }).encode()
+            req = urllib.request.Request(
+                url,
+                data=body,
+                headers={"Content-Type": "application/json", "User-Agent": "trade-dangerous-web/2.2"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=45) as resp:
+                results = json.loads(resp.read().decode()).get("results") or []
+        except Exception as e:
+            log(f"  anchor {q}: {e}")
+            continue
+        for r in results:
+            name = (r.get("name") or "").strip()
+            sys_name = (r.get("system_name") or "").strip()
+            if not name or not sys_name:
+                continue
+            if name.upper() != q.upper() and q.upper() not in name.upper():
+                continue
+            mkt = {}
+            for c in r.get("market") or []:
+                cname = (c.get("commodity") or "").strip()
+                if not cname:
+                    continue
+                buy = int(c.get("buy_price") or 0)
+                sell = int(c.get("sell_price") or 0)
+                supply = int(c.get("supply") or 0)
+                demand = int(c.get("demand") or 0)
+                if not is_station_market_commodity(cname, buy, sell, supply, demand):
+                    continue
+                mkt[cname.upper()] = {
+                    "buy": buy, "sell": sell, "supply": supply, "demand": demand,
+                }
+            if not mkt:
+                continue
+            x, y, z = r.get("system_x"), r.get("system_y"), r.get("system_z")
+            if x is None:
+                continue
+            sys_key = sys_name.upper()
+            key = f"{sys_key}/{name.upper()}"
+            systems[sys_key] = {
+                "x": round(float(x), 2),
+                "y": round(float(y), 2),
+                "z": round(float(z), 2),
+            }
+            stations[key] = {
+                "system": sys_key,
+                "pad": "L" if r.get("has_large_pad") or (r.get("large_pads") or 0) > 0 else "M",
+                "distLs": int(r.get("distance_to_arrival") or 0),
+                "planetary": bool(r.get("is_planetary")),
+                "market": mkt,
+            }
+            log(f"  anchor added {key} ({len(mkt)} commodities)")
+
+
 def write_data(systems, stations, source_label, out_path: str, max_shard_bytes: int | None = None):
     if max_shard_bytes is None:
         max_shard_bytes = int(os.environ.get("TD_MAX_SHARD_BYTES", "40000000"))
@@ -689,6 +755,8 @@ def main():
     else:
         systems, stations, label = build_from_eddblink(args.max_stations)
 
+    log("Merging anchor stations (Herbert Dock, etc.)…")
+    merge_anchor_stations(systems, stations)
     write_data(systems, stations, label, args.out)
 
 
