@@ -1,0 +1,74 @@
+name: Refresh trade data
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Data source"
+        required: true
+        default: spansh
+        type: choice
+        options:
+          - spansh
+          - eddblink
+          - sample
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-trade-data
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Rebuild trade data (sharded if large)
+        env:
+          # High station count is OK — output is split into <40MB files under GitHub's 100MB limit
+          TD_SOURCE: ${{ github.event.inputs.source || 'spansh' }}
+          TD_MAX_STATIONS: "25000"
+          TD_MAX_SHARD_BYTES: "40000000"
+        run: |
+          set -e
+          python build_data.py --out trade-data.json
+          echo "=== output files ==="
+          ls -lh trade-data.json trade-data-*.json 2>/dev/null || ls -lh trade-data.json
+          # Safety: no single file over 95MB
+          for f in trade-data.json trade-data-*.json; do
+            [ -f "$f" ] || continue
+            SIZE=$(wc -c < "$f")
+            echo "$f = $SIZE bytes"
+            if [ "$SIZE" -gt 95000000 ]; then
+              echo "::error::$f exceeds 95MB ($SIZE). Lower TD_MAX_SHARD_BYTES."
+              exit 1
+            fi
+          done
+
+      - name: Commit if the data changed
+        run: |
+          git config user.name "trade-data-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add trade-data.json
+          # include all shards (new, changed, or deleted)
+          git add -A -- trade-data-*.json 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No change in trade data, nothing to commit."
+          else
+            git status
+            git commit -m "Refresh trade data ($(date -u +'%Y-%m-%d %H:%M UTC')) [${{ github.event.inputs.source || 'spansh' }}]"
+            git push
+          fi
