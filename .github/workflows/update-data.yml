@@ -2,8 +2,6 @@ name: Refresh trade data
 
 on:
   schedule:
-    # Every 6 hours (safer for large dumps / rate limits).
-    # Change to "0 */3 * * *" if you want more frequent refreshes.
     - cron: "0 */6 * * *"
   workflow_dispatch:
     inputs:
@@ -36,17 +34,15 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -r scripts/requirements.txt
+        run: pip install -r requirements.txt
 
-      - name: Rebuild data/trade-data.json
+      - name: Rebuild trade-data.json
         env:
           TD_SOURCE: ${{ github.event.inputs.source || 'spansh' }}
-          # Soft cap keeps the Action under time/disk limits on free runners.
-          # Raise or set to 0 for unlimited once you know the dump size is OK.
           TD_MAX_STATIONS: "25000"
         run: |
           set -e
-          python scripts/build_data.py --out data/trade-data.json || {
+          python build_data.py --out trade-data.json || {
             echo "::warning::Data rebuild failed – keeping previous trade-data.json"
             exit 0
           }
@@ -55,10 +51,10 @@ jobs:
         run: |
           git config user.name "trade-data-bot"
           git config user.email "actions@users.noreply.github.com"
-          if git diff --quiet -- data/trade-data.json; then
+          if git diff --quiet -- trade-data.json; then
             echo "No change in trade data, nothing to commit."
           else
-            git add data/trade-data.json
+            git add trade-data.json
             git commit -m "Refresh trade data ($(date -u +'%Y-%m-%d %H:%M UTC')) [${{ github.event.inputs.source || 'spansh' }}]"
             git push
           fi
