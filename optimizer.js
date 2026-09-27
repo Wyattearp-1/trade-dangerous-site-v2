@@ -40,6 +40,24 @@ function isBlockedCommodity(name) {
 }
 
 
+
+/** True if station is Odyssey/surface-style (flag or name heuristics). */
+function isPlanetaryStation(st, key) {
+  if (st && st.planetary) return true;
+  const raw = (key || (st && st.key) || "").toUpperCase();
+  const name = raw.includes("/") ? raw.slice(raw.indexOf("/") + 1) : raw;
+  // Explicitly orbital / ship-landable starports
+  if (/(ORBITAL|STARPORT|OUTPOST|\bSTATION\b|\bDOCK\b|\bPORT\b|\bHUB\b|CITADEL|ASTEROID|CARRIER|MEMORIAL|\bCITY\b|TERMINAL)/.test(name)) {
+    return false;
+  }
+  // Common Odyssey settlement / surface installation naming
+  if (/(SETTLEMENT|PROSPECT|ENCAMPMENT|\bCAMP\b|\bBASE\b|INSTALLATION|FACILITY|COMPLEX|ESTATE|HOLDINGS|TERRITORY|COLONY|HOMESTEAD|GARDEN|NURSERY|CULTIVATION|HYDROPONICS|EXTRACTION|MINING|METALLURGIC|DRILLING|AGRICULTURAL|\bFORGE\b|\bWORKS\b|PLANTATION|\bFARM\b|\bSITE\b|BIOLOGICAL|GENETICS|MUNITIONS|JURISDICTION)/.test(name)) {
+    return true;
+  }
+  return false;
+}
+
+
 function dist3(a, b) {
   const dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
@@ -66,7 +84,7 @@ function prepStations(data, opts) {
         if (avoidStations.has(ku) || avoidStations.has(stationName)) continue;
       }
       // Odyssey / planetary settlements
-      if (opts.noPlanetary && st.planetary) continue;
+      if (opts.noPlanetary && isPlanetaryStation(st, key)) continue;
       if (opts.maxStationLs > 0 && (st.distLs || 0) > opts.maxStationLs) continue;
       // requirePad: 'L' = large only; 'M' = medium or large; 'any' = all
       const req = opts.requirePad || opts.maxPadSize;

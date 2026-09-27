@@ -479,7 +479,9 @@
           }
           const ms = Math.round(performance.now() - t0);
 
-          status.textContent = `Evaluated in ${ms}ms · start ${startKey} · ${routes.length} route(s)`;
+          const odysseyOff = opts.noPlanetary;
+          status.textContent = `Evaluated in ${ms}ms · start ${startKey} · ${routes.length} route(s)` +
+            (odysseyOff ? ' · Odyssey/planetary stations excluded' : '');
           renderRoutes(routes, $('sortBy') && $('sortBy').value);
         } catch (err) {
           status.className = 'status error';
