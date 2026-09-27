@@ -29,7 +29,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Needed so the bot can push back to main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -67,8 +66,13 @@ jobs:
           git config user.name "trade-data-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add trade-data.json
-          git add -A -- trade-data-*.json 2>/dev/null || true
+          # Stage new/changed shards AND deletions of old trade-data-*.json files
+          git add -- trade-data.json
+          git add -- trade-data-*.json 2>/dev/null || true
+          # Record deletions for any tracked trade-data* file removed by the build
+          git ls-files -z -- 'trade-data*.json' | xargs -0 -r git add -u --
+
+          git status
 
           if git diff --cached --quiet; then
             echo "No change in trade data, nothing to commit."
@@ -77,22 +81,25 @@ jobs:
 
           git commit -m "Refresh trade data ($(date -u +'%Y-%m-%d %H:%M UTC')) [${{ github.event.inputs.source || 'spansh' }}]"
 
-          # Remote may have moved (manual uploads while this job ran).
-          # Rebase our data commit on top of latest main, then push.
+          # Drop any leftover unstaged noise so rebase can run
+          git checkout -- . 2>/dev/null || true
+          git clean -fd -- 'trade-data*.json' 2>/dev/null || true
+
           BRANCH="${GITHUB_REF_NAME:-main}"
-          for attempt in 1 2 3; do
+          for attempt in 1 2 3 4 5; do
             echo "Push attempt $attempt on $BRANCH…"
             git fetch origin "$BRANCH"
-            if git pull --rebase origin "$BRANCH"; then
+            # autostash handles any remaining local dirt during rebase
+            if git pull --rebase --autostash origin "$BRANCH"; then
               if git push origin "HEAD:$BRANCH"; then
                 echo "Push succeeded."
                 exit 0
               fi
             fi
-            echo "Rebase/push conflicted or rejected; retrying…"
+            echo "Rebase/push failed; retrying…"
             git rebase --abort 2>/dev/null || true
-            sleep 5
+            sleep 8
           done
 
-          echo "::error::Could not push after retries. Re-run this workflow after other pushes finish."
+          echo "::error::Could not push after retries. Re-run this workflow when no other pushes are in progress."
           exit 1
