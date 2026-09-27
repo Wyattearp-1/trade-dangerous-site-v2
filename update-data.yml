@@ -38,14 +38,21 @@ jobs:
 
       - name: Rebuild trade-data.json
         env:
+          # Keep under GitHub's ~100MB hard file limit. 4000 stations is usually ~20-40MB.
           TD_SOURCE: ${{ github.event.inputs.source || 'spansh' }}
-          TD_MAX_STATIONS: "25000"
+          TD_MAX_STATIONS: "4000"
         run: |
           set -e
           python build_data.py --out trade-data.json || {
             echo "::warning::Data rebuild failed – keeping previous trade-data.json"
             exit 0
           }
+          SIZE=$(wc -c < trade-data.json)
+          echo "Output size: $SIZE bytes"
+          if [ "$SIZE" -gt 90000000 ]; then
+            echo "::error::trade-data.json is too large for GitHub ($SIZE bytes). Lower TD_MAX_STATIONS."
+            exit 1
+          fi
 
       - name: Commit if the data changed
         run: |
