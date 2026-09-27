@@ -1,0 +1,60 @@
+name: Refresh trade data
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Data source"
+        required: true
+        default: spansh
+        type: choice
+        options:
+          - spansh
+          - eddblink
+          - sample
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-trade-data
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Rebuild trade-data.json
+        env:
+          TD_SOURCE: ${{ github.event.inputs.source || 'spansh' }}
+          TD_MAX_STATIONS: "25000"
+        run: |
+          set -e
+          python build_data.py --out trade-data.json || {
+            echo "::warning::Data rebuild failed – keeping previous trade-data.json"
+            exit 0
+          }
+
+      - name: Commit if the data changed
+        run: |
+          git config user.name "trade-data-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if git diff --quiet -- trade-data.json; then
+            echo "No change in trade data, nothing to commit."
+          else
+            git add trade-data.json
+            git commit -m "Refresh trade data ($(date -u +'%Y-%m-%d %H:%M UTC')) [${{ github.event.inputs.source || 'spansh' }}]"
+            git push
+          fi
