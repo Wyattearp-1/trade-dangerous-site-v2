@@ -308,38 +308,93 @@
     });
   }
 
-  function renderRoutes(routes) {
+  let lastRoutes = [];
+
+  function routeMetrics(route) {
+    const hops = route.hops || [];
+    const dist = hops.reduce((s, h) => s + (h.distLy || 0), 0);
+    const n = hops.length || 1;
+    const profit = route.totalProfit || 0;
+    let tons = 0;
+    hops.forEach(h => (h.load || []).forEach(l => { tons += l.units || 0; }));
+    return {
+      profit,
+      dist,
+      hops: n,
+      profitPerHop: profit / n,
+      profitPerLy: dist > 0 ? profit / dist : profit,
+      crPerTon: tons > 0 ? profit / tons : 0,
+    };
+  }
+
+  function sortRoutes(routes, sortBy) {
+    const scored = routes.map(r => ({ r, m: routeMetrics(r) }));
+    const cmp = {
+      profit: (a, b) => b.m.profit - a.m.profit,
+      profitPerHop: (a, b) => b.m.profitPerHop - a.m.profitPerHop,
+      profitPerLy: (a, b) => b.m.profitPerLy - a.m.profitPerLy,
+      shortest: (a, b) => a.m.dist - b.m.dist || b.m.profit - a.m.profit,
+      fewestHops: (a, b) => a.m.hops - b.m.hops || b.m.profit - a.m.profit,
+      crPerTon: (a, b) => b.m.crPerTon - a.m.crPerTon,
+    }[sortBy] || ((a, b) => b.m.profit - a.m.profit);
+    scored.sort(cmp);
+    return scored.map(x => x.r);
+  }
+
+  function renderRoutes(routes, sortBy) {
     const container = $('runResults');
     container.innerHTML = '';
-    if (!routes.length) {
+    lastRoutes = routes || [];
+    if (!lastRoutes.length) {
       container.innerHTML = '<p class="status error">No profitable route found with these constraints. Try a larger jump range, more hops, or fewer avoid-rules.</p>';
       return;
     }
-    routes.forEach((route, i) => {
+
+    const sort = sortBy || ($('sortBy') && $('sortBy').value) || 'profit';
+    const maxN = Number(($('maxResults') && $('maxResults').value) || 8);
+    const ordered = sortRoutes(lastRoutes, sort).slice(0, maxN);
+
+    const toolbar = document.createElement('div');
+    toolbar.className = 'results-toolbar';
+    toolbar.innerHTML = `<span class="muted">${ordered.length} route${ordered.length === 1 ? '' : 's'} (sorted by ${sort})</span>`;
+    container.appendChild(toolbar);
+
+    ordered.forEach((route, i) => {
+      const m = routeMetrics(route);
       const card = document.createElement('div');
       card.className = 'route-card';
 
       const head = document.createElement('div');
       head.className = 'route-card-head';
-      head.innerHTML = `<span>Route ${i + 1}</span><span class="total">+${fmtCr(route.totalProfit)}</span>`;
+      head.innerHTML =
+        `<span>Route ${i + 1}</span>` +
+        `<span class="route-meta">${m.dist.toFixed(1)} ly · ${m.hops} hop${m.hops === 1 ? '' : 's'} · ${fmtCr(Math.round(m.profitPerLy))}/ly</span>` +
+        `<span class="total">+${fmtCr(route.totalProfit)}</span>`;
       card.appendChild(head);
 
       route.hops.forEach(h => {
         const hop = document.createElement('div');
         hop.className = 'hop';
         const rows = h.load.map(l =>
-          `<tr><td>${l.commodity}</td><td class="num">${l.units}</td><td class="num">${l.buy}</td><td class="num">${l.sell}</td><td class="num">+${Math.round(l.profit).toLocaleString()}</td></tr>`
+          `<tr><td>${escapeHtml(l.commodity)}</td><td class="num">${l.units}</td><td class="num">${l.buy}</td><td class="num">${l.sell}</td><td class="num">+${Math.round(l.profit).toLocaleString()}</td></tr>`
         ).join('');
+        const fromLink = inaraStationUrl(h.from.key);
+        const toLink = inaraStationUrl(h.to.key);
         hop.innerHTML = `
           <div class="hop-route">
-            <span>${stationLabel(h.from.key)} → ${stationLabel(h.to.key)}</span>
+            <span>
+              <a href="${fromLink}" target="_blank" rel="noopener">${escapeHtml(stationLabel(h.from.key))}</a>
+              →
+              <a href="${toLink}" target="_blank" rel="noopener">${escapeHtml(stationLabel(h.to.key))}</a>
+            </span>
             <span class="dist">${h.distLy.toFixed(1)} ly</span>
             <span class="hop-profit">+${fmtCr(h.profit)}</span>
           </div>
           <table class="load-table">
             <thead><tr><th>Commodity</th><th class="num">Units</th><th class="num">Buy</th><th class="num">Sell</th><th class="num">Profit</th></tr></thead>
             <tbody>${rows}</tbody>
-          </table>`;
+          </table>
+        `;
         card.appendChild(hop);
       });
 
@@ -348,6 +403,12 @@
   }
 
   function setupRunForm() {
+    if ($('sortBy')) {
+      $('sortBy').addEventListener('change', () => {
+        if (lastRoutes && lastRoutes.length) renderRoutes(lastRoutes, $('sortBy').value);
+      });
+    }
+
     $('runForm').addEventListener('submit', (e) => {
       e.preventDefault();
       const status = $('runStatus');
@@ -378,20 +439,28 @@
             hops: Number($('hops').value),
             loop: $('loop').checked,
             noRevisit: $('noRevisit').checked,
+            noPlanetary: $('noPlanetary') && $('noPlanetary').checked,
             towardSystem: $('towardSystem').value.trim() || undefined,
             avoidSystems: splitList($('avoidSystems').value),
+            avoidStations: splitList($('avoidStations') ? $('avoidStations').value : ''),
             avoidCommodities: splitList($('avoidCommodities').value),
             minProfitPerUnit: Number($('minProfit').value),
             distancePenalty: Number($('distancePenalty').value),
             beamWidth: Number($('beamWidth').value),
+            requirePad: ($('padSize') && $('padSize').value) || 'any',
+            maxStationLs: Number(($('maxStationLs') && $('maxStationLs').value) || 0),
           };
 
           const t0 = performance.now();
-          const routes = findRoutes(DATA, opts);
+          let routes = findRoutes(DATA, opts);
+          const minTotal = Number(($('minRouteProfit') && $('minRouteProfit').value) || 0);
+          if (minTotal > 0) {
+            routes = routes.filter(r => (r.totalProfit || 0) >= minTotal);
+          }
           const ms = Math.round(performance.now() - t0);
 
-          status.textContent = `Evaluated in ${ms}ms · start ${startKey}`;
-          renderRoutes(routes);
+          status.textContent = `Evaluated in ${ms}ms · start ${startKey} · ${routes.length} route(s)`;
+          renderRoutes(routes, $('sortBy') && $('sortBy').value);
         } catch (err) {
           status.className = 'status error';
           status.innerHTML = escapeHtml(err.message).replace(

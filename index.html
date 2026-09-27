@@ -81,25 +81,68 @@
             <input type="text" id="avoidSystems" name="avoidSystems" placeholder="e.g. Robigo, Sothis">
           </div>
           <div class="field">
+            <label for="avoidStations">Avoid stations <span class="optional">comma-separated</span></label>
+            <input type="text" id="avoidStations" name="avoidStations" placeholder="e.g. Hutton Orbital, or SYSTEM/STATION">
+          </div>
+          <div class="field">
             <label for="avoidCommodities">Avoid commodities <span class="optional">comma-separated</span></label>
-            <input type="text" id="avoidCommodities" name="avoidCommodities" placeholder="e.g. Slaves">
+            <input type="text" id="avoidCommodities" name="avoidCommodities" placeholder="e.g. Slaves, Narcotics">
+          </div>
+          <div class="field">
+            <label for="sortBy">Sort results by</label>
+            <select id="sortBy" name="sortBy">
+              <option value="profit" selected>Highest profit (CR)</option>
+              <option value="profitPerHop">Profit per hop</option>
+              <option value="profitPerLy">Profit per light year</option>
+              <option value="shortest">Shortest distance</option>
+              <option value="fewestHops">Fewest hops</option>
+              <option value="crPerTon">CR per cargo ton (avg)</option>
+            </select>
           </div>
         </div>
 
-        <details class="advanced">
-          <summary>Advanced</summary>
+        <details class="advanced" open>
+          <summary>More options</summary>
           <div class="grid2">
             <div class="field">
               <label for="minProfit">Min profit / unit (cr)</label>
               <input type="number" id="minProfit" name="minProfit" min="0" step="1" value="1">
             </div>
             <div class="field">
-              <label for="distancePenalty">Distance penalty</label>
+              <label for="minRouteProfit">Min total route profit (cr)</label>
+              <input type="number" id="minRouteProfit" name="minRouteProfit" min="0" step="1000" value="0">
+            </div>
+            <div class="field">
+              <label for="padSize">Ship pad size</label>
+              <select id="padSize" name="padSize">
+                <option value="any" selected>Any pad (small ship)</option>
+                <option value="M">Medium or large pad</option>
+                <option value="L">Large pad only</option>
+              </select>
+              <p class="field-hint">Match your ship’s landing pad requirement.</p>
+            </div>
+            <div class="field">
+              <label for="maxStationLs">Max station distance from star (Ls)</label>
+              <input type="number" id="maxStationLs" name="maxStationLs" min="0" step="100" value="0" placeholder="0 = no limit">
+              <p class="field-hint">0 = no limit. Use e.g. 5000 to skip deep-space stations.</p>
+            </div>
+            <div class="field">
+              <label class="checkbox">
+                <input type="checkbox" id="noPlanetary" name="noPlanetary">
+                Exclude planetary / Odyssey settlements
+              </label>
+            </div>
+            <div class="field">
+              <label for="distancePenalty">Prefer closer hops (distance penalty)</label>
               <input type="range" id="distancePenalty" name="distancePenalty" min="0" max="0.3" step="0.01" value="0.05">
             </div>
             <div class="field">
               <label for="beamWidth">Search width (quality vs speed)</label>
               <input type="range" id="beamWidth" name="beamWidth" min="2" max="16" step="1" value="6">
+            </div>
+            <div class="field">
+              <label for="maxResults">Max routes shown</label>
+              <input type="number" id="maxResults" name="maxResults" min="1" max="30" step="1" value="8">
             </div>
           </div>
         </details>

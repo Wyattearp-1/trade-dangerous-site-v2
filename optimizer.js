@@ -55,9 +55,17 @@ function prepStations(data, opts) {
   for (const [key, st] of Object.entries(data.stations)) {
     const sysName = st.system.toUpperCase();
     if (avoidSystems.has(sysName)) continue;
-    if (avoidStations.has(key.toUpperCase())) continue;
-    if (opts.maxPadSize === 'M' && st.pad === 'L') continue; // can't dock
+    if (avoidStations.size) {
+      const ku = key.toUpperCase();
+      const stationName = ku.includes('/') ? ku.split('/').slice(1).join('/') : ku;
+      if (avoidStations.has(ku) || avoidStations.has(stationName)) continue;
+    }
     if (opts.noPlanetary && st.planetary) continue;
+    if (opts.maxStationLs > 0 && (st.distLs || 0) > opts.maxStationLs) continue;
+    // requirePad: 'L' = large only; 'M' = medium or large; 'any'/undefined = all
+    const req = opts.requirePad || opts.maxPadSize;
+    if (req === 'L' && st.pad !== 'L') continue;
+    if (req === 'M' && st.pad === 'S') continue;
     const sys = data.systems[st.system];
     if (!sys) continue;
     stations.push({

@@ -327,3 +327,26 @@ footer a:hover { color: var(--amber); }
   line-height: 1.4;
 }
 .field-hint a { color: var(--amber); }
+
+.results-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 0.75rem 0 0.5rem;
+  font-size: 0.9rem;
+  color: var(--muted, #9aa);
+}
+.route-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.route-card-head .route-meta {
+  font-size: 0.85rem;
+  color: var(--muted, #9aa);
+  font-family: var(--mono, monospace);
+}
+.hop-route a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.hop-route a:hover { color: var(--accent, #6cf); }
