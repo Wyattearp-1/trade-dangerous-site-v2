@@ -32,6 +32,7 @@ import csv
 import gzip
 import io
 import json
+import math
 import os
 import sys
 import time
@@ -64,6 +65,7 @@ EDDBLINK_BASE = os.environ.get(
 ).rstrip("/") + "/"
 
 MAX_STATIONS = int(os.environ.get("TD_MAX_STATIONS", "0")) or None
+MAX_LY = float(os.environ.get("TD_MAX_LY", "800"))  # only keep systems within this of Sol
 
 # Salvage / non-market cargo (found in space or mission rewards — not station market trade)
 SALVAGE_NAMES = {
@@ -173,22 +175,20 @@ def build_from_spansh(url: str, max_stations):
     if ijson is None:
         raise SystemExit("ijson is required for Spansh source: pip install ijson")
 
-    systems: dict = {}
-    stations: dict = {}
-    count = 0
+    max_ly = float(os.environ.get("TD_MAX_LY", "800"))
+    # Collect candidates as (dist_sol, key, system_coords, station_dict) then keep closest
+    candidates = []
     skipped = 0
+    seen = 0
     t0 = time.time()
+    log(f"Spansh: scanning dump (prefer systems within {max_ly} ly of Sol)…")
 
     with open_spansh(url) as fh:
         for obj in ijson.items(fh, "item"):
-            if max_stations and count >= max_stations:
-                break
-
             if "stations" in obj or "bodies" in obj:
                 sys_name = obj.get("name")
                 coords = obj.get("coords") or {}
                 raw_stations = list(obj.get("stations") or [])
-                # also surface stations on bodies
                 for body in obj.get("bodies") or []:
                     raw_stations.extend(body.get("stations") or [])
             else:
@@ -206,11 +206,18 @@ def build_from_spansh(url: str, max_stations):
 
             if not sys_name or "x" not in (coords or {}):
                 continue
+            try:
+                x, y, z = float(coords["x"]), float(coords["y"]), float(coords["z"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            dist_sol = math.sqrt(x * x + y * y + z * z)
+            if max_ly > 0 and dist_sol > max_ly:
+                continue
+
             sys_key = sys_name.strip().upper()
+            sys_coords = {"x": round(x, 2), "y": round(y, 2), "z": round(z, 2)}
 
             for st in raw_stations:
-                if max_stations and count >= max_stations:
-                    break
                 st_name = st.get("name")
                 if not st_name:
                     continue
@@ -218,15 +225,9 @@ def build_from_spansh(url: str, max_stations):
                 if not mkt:
                     skipped += 1
                     continue
-
-                systems[sys_key] = {
-                    "x": round(float(coords["x"]), 2),
-                    "y": round(float(coords["y"]), 2),
-                    "z": round(float(coords["z"]), 2),
-                }
-                key = f"{sys_key}/{st_name.strip().upper()}"
                 st_type = (st.get("type") or "").lower()
-                stations[key] = {
+                key = f"{sys_key}/{st_name.strip().upper()}"
+                entry = {
                     "system": sys_key,
                     "pad": pad_size_from_station(st),
                     "distLs": int(
@@ -241,27 +242,28 @@ def build_from_spansh(url: str, max_stations):
                     ),
                     "market": mkt,
                 }
-                count += 1
-                if count % 5000 == 0:
-                    log(f"  …{count} stations ({time.time() - t0:.0f}s)")
+                candidates.append((dist_sol, key, sys_key, sys_coords, entry))
+                seen += 1
+                if seen % 10000 == 0:
+                    log(f"  …scanned {seen} market stations within {max_ly} ly ({time.time() - t0:.0f}s)")
 
-    log(f"Spansh: kept {count} stations ({skipped} skipped, no market).")
+    # Closest to Sol first so the bubble (Wolf 906, etc.) is never dropped
+    candidates.sort(key=lambda c: (c[0], c[1]))
+    if max_stations and len(candidates) > max_stations:
+        candidates = candidates[:max_stations]
+
+    systems: dict = {}
+    stations: dict = {}
+    for dist_sol, key, sys_key, sys_coords, entry in candidates:
+        systems[sys_key] = sys_coords
+        stations[key] = entry
+
+    log(
+        f"Spansh: kept {len(stations)} stations in {len(systems)} systems "
+        f"(scanned {seen}, skipped empty market {skipped}, max_ly={max_ly})."
+    )
     return systems, stations, url
 
-
-# ---------------------------------------------------------------------------
-# EDDBlink / Tromador path (CSV)
-# ---------------------------------------------------------------------------
-
-def download_text(url: str) -> str:
-    log(f"Downloading {url}")
-    if requests:
-        r = requests.get(url, timeout=180, headers={"User-Agent": "trade-dangerous-web/2.0"})
-        r.raise_for_status()
-        return r.text
-    req = urllib.request.Request(url, headers={"User-Agent": "trade-dangerous-web/2.0"})
-    with urllib.request.urlopen(req, timeout=180) as resp:
-        return resp.read().decode("utf-8", errors="replace")
 
 
 def build_from_eddblink(max_stations):

@@ -41,6 +41,7 @@ jobs:
           # High station count is OK — output is split into <40MB files under GitHub's 100MB limit
           TD_SOURCE: ${{ github.event.inputs.source || 'spansh' }}
           TD_MAX_STATIONS: "25000"
+          TD_MAX_LY: "800"
           TD_MAX_SHARD_BYTES: "40000000"
         run: |
           set -e
