@@ -2,17 +2,18 @@ name: Refresh trade data
 
 on:
   schedule:
-    - cron: "0 */6 * * *"
+    # Every 3 hours (UTC)
+    - cron: "0 */3 * * *"
   workflow_dispatch:
     inputs:
       source:
-        description: "Data source"
+        description: "Data source (eddblink = faster; spansh = fuller dump)"
         required: true
-        default: spansh
+        default: eddblink
         type: choice
         options:
-          - spansh
           - eddblink
+          - spansh
           - sample
 
 permissions:
@@ -25,7 +26,7 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,12 +42,15 @@ jobs:
 
       - name: Rebuild trade data (sharded if large)
         env:
-          TD_SOURCE: ${{ github.event.inputs.source || 'spansh' }}
-          TD_MAX_STATIONS: "25000"
+          # Scheduled runs default to eddblink (minutes, not 10–15+).
+          # Manual "spansh" still available for a fuller rebuild.
+          TD_SOURCE: ${{ github.event.inputs.source || 'eddblink' }}
+          TD_MAX_STATIONS: "20000"
           TD_MAX_LY: "800"
           TD_MAX_SHARD_BYTES: "40000000"
         run: |
           set -e
+          echo "Building with source=$TD_SOURCE max_stations=$TD_MAX_STATIONS max_ly=$TD_MAX_LY"
           python build_data.py --out trade-data.json
           echo "=== output files ==="
           ls -lh trade-data.json trade-data-*.json 2>/dev/null || ls -lh trade-data.json
@@ -66,10 +70,8 @@ jobs:
           git config user.name "trade-data-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Stage new/changed shards AND deletions of old trade-data-*.json files
           git add -- trade-data.json
           git add -- trade-data-*.json 2>/dev/null || true
-          # Record deletions for any tracked trade-data* file removed by the build
           git ls-files -z -- 'trade-data*.json' | xargs -0 -r git add -u --
 
           git status
@@ -79,9 +81,8 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Refresh trade data ($(date -u +'%Y-%m-%d %H:%M UTC')) [${{ github.event.inputs.source || 'spansh' }}]"
+          git commit -m "Refresh trade data ($(date -u +'%Y-%m-%d %H:%M UTC')) [${{ github.event.inputs.source || 'eddblink' }}]"
 
-          # Drop any leftover unstaged noise so rebase can run
           git checkout -- . 2>/dev/null || true
           git clean -fd -- 'trade-data*.json' 2>/dev/null || true
 
@@ -89,7 +90,6 @@ jobs:
           for attempt in 1 2 3 4 5; do
             echo "Push attempt $attempt on $BRANCH…"
             git fetch origin "$BRANCH"
-            # autostash handles any remaining local dirt during rebase
             if git pull --rebase --autostash origin "$BRANCH"; then
               if git push origin "HEAD:$BRANCH"; then
                 echo "Push succeeded."
