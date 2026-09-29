@@ -2,18 +2,8 @@ name: Refresh trade data
 
 on:
   schedule:
-    - cron: "0 */6 * * *"
-  workflow_dispatch:
-    inputs:
-      source:
-        description: "Data source"
-        required: true
-        default: spansh
-        type: choice
-        options:
-          - spansh
-          - eddblink
-          - sample
+    - cron: "0 */3 * * *"
+  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -25,51 +15,69 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r scripts/requirements.txt
 
-      - name: Rebuild trade data (sharded if large)
+      - name: Rebuild trade data (sharded under 40MB files)
         env:
-          # High station count is OK — output is split into <40MB files under GitHub's 100MB limit
-          TD_SOURCE: ${{ github.event.inputs.source || 'spansh' }}
-          TD_MAX_STATIONS: "25000"
+          TD_MAX_STATIONS: "15000"
           TD_MAX_LY: "800"
           TD_MAX_SHARD_BYTES: "40000000"
         run: |
           set -e
-          python build_data.py --out trade-data.json
-          echo "=== output files ==="
-          ls -lh trade-data.json trade-data-*.json 2>/dev/null || ls -lh trade-data.json
-          # Safety: no single file over 95MB
-          for f in trade-data.json trade-data-*.json; do
+          python scripts/build_data.py --out data/trade-data.json
+          echo "=== output ==="
+          ls -lh data/trade-data.json data/trade-data-*.json 2>/dev/null || ls -lh data/trade-data.json
+          for f in data/trade-data.json data/trade-data-*.json; do
             [ -f "$f" ] || continue
             SIZE=$(wc -c < "$f")
             echo "$f = $SIZE bytes"
             if [ "$SIZE" -gt 95000000 ]; then
-              echo "::error::$f exceeds 95MB ($SIZE). Lower TD_MAX_SHARD_BYTES."
+              echo "::error::$f exceeds 95MB"
               exit 1
             fi
           done
 
-      - name: Commit if the data changed
+      - name: Commit and push if data changed
         run: |
+          set -e
           git config user.name "trade-data-bot"
-          git config user.email "actions@users.noreply.github.com"
-          git add trade-data.json
-          # include all shards (new, changed, or deleted)
-          git add -A -- trade-data-*.json 2>/dev/null || true
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -- data/trade-data.json
+          git add -- data/trade-data-*.json 2>/dev/null || true
+          git ls-files -z -- 'data/trade-data*.json' | xargs -0 -r git add -u --
+
           if git diff --cached --quiet; then
-            echo "No change in trade data, nothing to commit."
-          else
-            git status
-            git commit -m "Refresh trade data ($(date -u +'%Y-%m-%d %H:%M UTC')) [${{ github.event.inputs.source || 'spansh' }}]"
-            git push
+            echo "No change in trade data."
+            exit 0
           fi
+
+          git commit -m "Refresh trade data ($(date -u +'%Y-%m-%d %H:%M UTC'))"
+          git checkout -- . 2>/dev/null || true
+
+          BRANCH="${GITHUB_REF_NAME:-main}"
+          for attempt in 1 2 3 4 5; do
+            echo "Push attempt $attempt…"
+            git fetch origin "$BRANCH"
+            if git pull --rebase --autostash origin "$BRANCH"; then
+              if git push origin "HEAD:$BRANCH"; then
+                echo "Push succeeded."
+                exit 0
+              fi
+            fi
+            git rebase --abort 2>/dev/null || true
+            sleep 8
+          done
+          echo "::error::Push failed after retries"
+          exit 1
