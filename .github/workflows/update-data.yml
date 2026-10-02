@@ -2,8 +2,11 @@ name: Refresh trade data
 
 on:
   schedule:
-    # Every 3 hours (UTC)
+    # Fast refresh every 3 hours (EDDBlink)
     - cron: "0 */3 * * *"
+    # Fuller Spansh rebuild once per day at 06:15 UTC
+    # (offset from :00 so it doesn't collide with the 3-hour job)
+    - cron: "15 6 * * *"
   workflow_dispatch:
     inputs:
       source:
@@ -26,8 +29,21 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
+      - name: Pick data source
+        id: src
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SOURCE="${{ github.event.inputs.source }}"
+          elif [ "${{ github.event.schedule }}" = "15 6 * * *" ]; then
+            SOURCE="spansh"
+          else
+            SOURCE="eddblink"
+          fi
+          echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
+          echo "Using data source: $SOURCE"
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -42,9 +58,7 @@ jobs:
 
       - name: Rebuild trade data (sharded if large)
         env:
-          # Scheduled runs default to eddblink (minutes, not 10–15+).
-          # Manual "spansh" still available for a fuller rebuild.
-          TD_SOURCE: ${{ github.event.inputs.source || 'eddblink' }}
+          TD_SOURCE: ${{ steps.src.outputs.source }}
           TD_MAX_STATIONS: "20000"
           TD_MAX_LY: "800"
           TD_MAX_SHARD_BYTES: "40000000"
@@ -59,7 +73,7 @@ jobs:
             SIZE=$(wc -c < "$f")
             echo "$f = $SIZE bytes"
             if [ "$SIZE" -gt 95000000 ]; then
-              echo "::error::$f exceeds 95MB ($SIZE). Lower TD_MAX_SHARD_BYTES."
+              echo "::error::$f exceeds 95MB ($SIZE). Lower TD_MAX_SHARD_BYTES or TD_MAX_STATIONS."
               exit 1
             fi
           done
@@ -81,7 +95,8 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Refresh trade data ($(date -u +'%Y-%m-%d %H:%M UTC')) [${{ github.event.inputs.source || 'eddblink' }}]"
+          SRC="${{ steps.src.outputs.source }}"
+          git commit -m "Refresh trade data ($(date -u +'%Y-%m-%d %H:%M UTC')) [$SRC]"
 
           git checkout -- . 2>/dev/null || true
           git clean -fd -- 'trade-data*.json' 2>/dev/null || true
@@ -101,5 +116,5 @@ jobs:
             sleep 8
           done
 
-          echo "::error::Could not push after retries. Re-run this workflow when no other pushes are in progress."
+          echo "::error::Could not push after retries."
           exit 1
