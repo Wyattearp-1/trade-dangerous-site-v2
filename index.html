@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Browser multi-hop trade route optimizer for Elite: Dangerous, inspired by Trade Dangerous.">
+<meta name="description" content="Browser multi-hop trade route optimizer for Elite: Dangerous that maximises total credits, inspired by Trade Dangerous.">
+<meta name="color-scheme" content="dark">
 <title>Trade Dangerous — Web</title>
 <link rel="stylesheet" href="style.css">
 </head>
@@ -12,59 +13,63 @@
 
   <header class="topbar">
     <div class="brand">
-      <span class="brand-mark">TD</span>
+      <span class="brand-mark" aria-hidden="true">TD</span>
       <div class="brand-text">
         <h1>Trade Dangerous <span class="web">/ web</span></h1>
-        <p id="dataStamp" class="data-stamp">loading dataset…</p>
+        <p id="dataStamp" class="data-stamp" role="status">Loading dataset…</p>
+        <progress id="loadProgress" class="load-progress" max="100" value="0" aria-label="Dataset download progress"></progress>
       </div>
     </div>
-    <nav class="tabs">
-      <button class="tab-btn active" data-tab="run">Route planner</button>
-      <button class="tab-btn" data-tab="quick">Quick trade</button>
-      <button class="tab-btn" data-tab="about">About this data</button>
+    <nav class="tabs" role="tablist" aria-label="Sections">
+      <button class="tab-btn active" role="tab" id="tabbtn-run" aria-selected="true" aria-controls="tab-run" data-tab="run">Route planner</button>
+      <button class="tab-btn" role="tab" id="tabbtn-quick" aria-selected="false" aria-controls="tab-quick" data-tab="quick" tabindex="-1">Quick trade</button>
+      <button class="tab-btn" role="tab" id="tabbtn-about" aria-selected="false" aria-controls="tab-about" data-tab="about" tabindex="-1">About this data</button>
     </nav>
   </header>
 
   <main>
-    <section id="tab-run" class="panel active">
-      <form id="runForm" class="controls">
+    <section id="tab-run" class="panel active" role="tabpanel" aria-labelledby="tabbtn-run">
+      <form id="runForm" class="controls" novalidate>
         <div class="field">
           <label for="startStation">Starting station</label>
-          <input id="startStation" name="startStation" placeholder="Type system or station name…" required autocomplete="off">
-          <p class="field-hint">Type any system or station name from the current market snapshot (autocomplete). Missing a station? Search <a href="https://inara.cz/elite/stations/" target="_blank" rel="noopener">Inara</a> — after the data refresh Action runs, stations with markets show up here.</p>
+          <input type="text" id="startStation" name="startStation" placeholder="Type system or station name…" required autocomplete="off">
+          <p class="field-hint">Type any system or station name. Every station that has a market is searchable; the map around your start loads when you plot a route.</p>
         </div>
 
         <div class="grid2">
           <div class="field">
             <label for="credits">Credits</label>
-            <input type="number" id="credits" name="credits" min="0" step="1000" value="100000" required>
+            <input type="number" id="credits" name="credits" min="0" step="1000" value="100000" required inputmode="numeric">
           </div>
           <div class="field">
             <label for="insurance">Insurance reserve</label>
-            <input type="number" id="insurance" name="insurance" min="0" step="1000" value="10000">
+            <input type="number" id="insurance" name="insurance" min="0" step="1000" value="10000" inputmode="numeric">
           </div>
           <div class="field">
             <label for="capacity">Cargo capacity (t)</label>
-            <input type="number" id="capacity" name="capacity" min="1" step="1" value="64" required>
+            <input type="number" id="capacity" name="capacity" min="1" step="1" value="64" required inputmode="numeric">
           </div>
           <div class="field">
             <label for="lyPer">Jump range (ly)</label>
-            <input type="number" id="lyPer" name="lyPer" min="1" step="0.1" value="20" required>
+            <input type="number" id="lyPer" name="lyPer" min="1" step="0.1" value="20" required inputmode="decimal">
           </div>
           <div class="field">
             <label for="jumpsPer">Max jumps between hops</label>
-            <input type="number" id="jumpsPer" name="jumpsPer" min="0" step="1" value="2">
+            <input type="number" id="jumpsPer" name="jumpsPer" min="0" step="1" value="2" inputmode="numeric">
+            <p class="field-hint">Reach per hop = jump range × jumps, measured in a straight line. 0 = same system only.</p>
           </div>
           <div class="field">
             <label for="hops">Trade hops</label>
-            <input type="number" id="hops" name="hops" min="1" max="12" step="1" value="4">
+            <input type="number" id="hops" name="hops" min="1" max="12" step="1" value="4" inputmode="numeric">
           </div>
         </div>
 
         <div class="grid2">
           <div class="field">
             <label for="towardSystem">Head toward system <span class="optional">optional</span></label>
-            <input type="text" id="towardSystem" name="towardSystem" placeholder="e.g. Lave">
+            <input type="text" id="towardSystem" name="towardSystem" placeholder="e.g. Lave" autocomplete="off" list="systemList">
+            <datalist id="systemList"></datalist>
+            <p class="field-hint">Every hop must end closer to this system (or within one jump range of it).</p>
           </div>
           <div class="field">
             <label class="checkbox">
@@ -91,13 +96,13 @@
           <div class="field">
             <label for="sortBy">Sort results by</label>
             <select id="sortBy" name="sortBy">
-              <option value="profit" selected>Highest profit (CR)</option>
+              <option value="profit" selected>Highest total profit (CR)</option>
               <option value="profitPerHop">Profit per hop</option>
-              <option value="profitPerLy">Profit per light year</option>
+              <option value="crPerTon">CR per cargo ton (avg)</option>
               <option value="shortest">Shortest distance</option>
               <option value="fewestHops">Fewest hops</option>
-              <option value="crPerTon">CR per cargo ton (avg)</option>
             </select>
+            <p class="field-hint">Routes are always <em>searched</em> for the highest total credits; this only reorders the results.</p>
           </div>
         </div>
 
@@ -106,11 +111,11 @@
           <div class="grid2">
             <div class="field">
               <label for="minProfit">Min profit / unit (cr)</label>
-              <input type="number" id="minProfit" name="minProfit" min="0" step="1" value="1">
+              <input type="number" id="minProfit" name="minProfit" min="0" step="1" value="1" inputmode="numeric">
             </div>
             <div class="field">
               <label for="minRouteProfit">Min total route profit (cr)</label>
-              <input type="number" id="minRouteProfit" name="minRouteProfit" min="0" step="1000" value="0">
+              <input type="number" id="minRouteProfit" name="minRouteProfit" min="0" step="1000" value="0" inputmode="numeric">
             </div>
             <div class="field">
               <label for="padSize">Ship pad size</label>
@@ -123,90 +128,101 @@
             </div>
             <div class="field">
               <label for="maxStationLs">Max station distance from star (Ls)</label>
-              <input type="number" id="maxStationLs" name="maxStationLs" min="0" step="100" value="0" placeholder="0 = no limit">
-              <p class="field-hint">0 = no limit. Use e.g. 5000 to skip deep-space stations.</p>
+              <input type="number" id="maxStationLs" name="maxStationLs" min="0" step="100" value="0" placeholder="0 = no limit" inputmode="numeric">
+              <p class="field-hint">0 = no limit. Use e.g. 5000 to skip far-flung stations.</p>
             </div>
             <div class="field">
+              <label for="maxAge">Max price age</label>
+              <select id="maxAge" name="maxAge">
+                <option value="0">Any age</option>
+                <option value="1">1 hour</option>
+                <option value="6">6 hours</option>
+                <option value="24">24 hours</option>
+                <option value="72">3 days</option>
+                <option value="168" selected>7 days</option>
+              </select>
+              <p class="field-hint">Routes skip stations whose prices are older than this, so a stale price can’t fake a big profit. Your <em>starting</em> station is always allowed. Needs a dataset with timestamps.</p>
+            </div>
+            <div class="field">
+              <label class="checkbox">
+                <input type="checkbox" id="includeCarriers" name="includeCarriers">
+                Include fleet carriers
+              </label>
+              <p class="field-hint">Off by default: carriers move and their markets are often stale.</p>
               <label class="checkbox">
                 <input type="checkbox" id="includeOdyssey" name="includeOdyssey" checked>
                 Include Odyssey / planetary stations
               </label>
-              <p class="field-hint">Uncheck to skip surface Odyssey settlements (prospects, camps, bases, installations). Orbital stations only.</p>
+              <p class="field-hint">Uncheck to use orbital stations only.</p>
             </div>
             <div class="field">
-              <label for="distancePenalty">Prefer closer hops (distance penalty)</label>
-              <input type="range" id="distancePenalty" name="distancePenalty" min="0" max="0.3" step="0.01" value="0.05">
-            </div>
-            <div class="field">
-              <label for="beamWidth">Search width (quality vs speed)</label>
+              <label for="beamWidth">Search width: <output id="beamWidthOut">6</output></label>
               <input type="range" id="beamWidth" name="beamWidth" min="2" max="16" step="1" value="6">
+              <p class="field-hint">Wider finds richer routes but takes longer.</p>
             </div>
             <div class="field">
               <label for="maxResults">Max routes shown</label>
-              <input type="number" id="maxResults" name="maxResults" min="1" max="30" step="1" value="8">
+              <input type="number" id="maxResults" name="maxResults" min="1" max="30" step="1" value="8" inputmode="numeric">
             </div>
           </div>
         </details>
 
-        <button type="submit" class="primary">Plot best routes</button>
+        <div class="btn-row">
+          <button type="submit" class="primary" id="runBtn" disabled>Loading data…</button>
+          <button type="button" class="secondary" id="shareBtn" title="Copy a link with these settings">Copy settings link</button>
+        </div>
       </form>
 
-      <div id="runStatus" class="status"></div>
+      <div id="runStatus" class="status" role="status" aria-live="polite"></div>
+      <ul id="runWarnings" class="warnings" aria-live="polite"></ul>
       <div id="runResults" class="results"></div>
     </section>
 
-    <section id="tab-quick" class="panel">
-      <form id="quickForm" class="controls">
+    <section id="tab-quick" class="panel" role="tabpanel" aria-labelledby="tabbtn-quick" hidden>
+      <form id="quickForm" class="controls" novalidate>
         <div class="grid2">
           <div class="field">
             <label for="qFrom">Buy at</label>
-            <input id="qFrom" name="qFrom" placeholder="Type system or station name…" required autocomplete="off">
+            <input type="text" id="qFrom" name="qFrom" placeholder="Type system or station name…" required autocomplete="off">
           </div>
           <div class="field">
             <label for="qTo">Sell at</label>
-            <input id="qTo" name="qTo" placeholder="Type system or station name…" required autocomplete="off">
+            <input type="text" id="qTo" name="qTo" placeholder="Type system or station name…" required autocomplete="off">
           </div>
           <div class="field">
             <label for="qCredits">Credits</label>
-            <input type="number" id="qCredits" name="qCredits" min="0" step="1000" value="100000" required>
+            <input type="number" id="qCredits" name="qCredits" min="0" step="1000" value="100000" required inputmode="numeric">
           </div>
           <div class="field">
             <label for="qCapacity">Cargo capacity (t)</label>
-            <input type="number" id="qCapacity" name="qCapacity" min="1" step="1" value="64" required>
+            <input type="number" id="qCapacity" name="qCapacity" min="1" step="1" value="64" required inputmode="numeric">
           </div>
         </div>
-        <button type="submit" class="primary">Find best load</button>
+        <button type="submit" class="primary" id="quickBtn" disabled>Loading data…</button>
       </form>
-      <div id="quickResults" class="results"></div>
+      <div id="quickResults" class="results" role="status" aria-live="polite"></div>
     </section>
 
-    <section id="tab-about" class="panel">
+    <section id="tab-about" class="panel" role="tabpanel" aria-labelledby="tabbtn-about" hidden>
       <div class="about">
-        <h2>Where this data comes from</h2>
+        <h2>How it works</h2>
         <p>
-          This is a static site. The route optimizer runs entirely in your browser against
-          <code>trade-data.json</code>. A GitHub Actions workflow rebuilds that file on a
-          schedule from public dumps and commits it back, so the live site stays reasonably fresh.
+          This is a static site. The route search runs entirely in your browser (in a background
+          thread) against a market snapshot that a GitHub Actions workflow rebuilds from the public
+          <a href="https://spansh.co.uk/dumps" target="_blank" rel="noopener">Spansh</a> station dump.
         </p>
-        <p><strong>Supported bulk sources</strong> (choose when you trigger the workflow, or set
-          <code>TD_SOURCE</code>):</p>
-        <ul>
-          <li><strong>Spansh</strong> — default. Full station + market dump from
-            <a href="https://spansh.co.uk/dumps" target="_blank" rel="noopener">spansh.co.uk/dumps</a>.</li>
-          <li><strong>EDDBlink / Tromador</strong> — the same feed Trade Dangerous recommends
-            (<a href="https://elite.tromador.com/" target="_blank" rel="noopener">elite.tromador.com</a>).
-            Often smaller and better for frequent refreshes.</li>
-        </ul>
         <p>
-          <strong>Inara</strong> does not publish a bulk market dump or an open bulk API suitable
-          for offline routing (only a rate-limited CMDR/profile API). Instead, every station in the
-          route results links to Inara so you can cross-check live prices and station details there.
+          <strong>Goal: most credits.</strong> Every hop is scored by the real cargo profit it earns,
+          and the search keeps the richest partial routes. Distance is only a reach limit; it is shown for
+          information and never traded off against profit.
+        </p>
+        <p>
+          Every station with a market is included and searchable. Prices far outside a
+          commodity’s normal range are discarded as bad data, and routes ignore prices older than your “max price age” setting. Always sanity-check a route against live
+          prices (every station links to <a href="https://inara.cz/" target="_blank" rel="noopener">Inara</a>) before
+          you commit your cargo.
         </p>
         <p id="aboutStamp"></p>
-        <p>
-          Demo data ships in the repo so the site works the moment you open it, before the first
-          scheduled rebuild finishes.
-        </p>
       </div>
     </section>
   </main>
@@ -217,7 +233,9 @@
   </footer>
 </div>
 
+<script src="data.js"></script>
 <script src="optimizer.js"></script>
+<script src="engine.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

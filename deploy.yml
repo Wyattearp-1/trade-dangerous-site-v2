@@ -1,0 +1,165 @@
+name: Build and deploy
+
+# One workflow does everything so data refreshes never need cross-workflow triggers:
+#   test   -> unit tests (JS optimizer + Python data builder)
+#   data   -> (schedule / manual only) rebuild market data and force-push it to the `data` branch
+#   deploy -> assemble site files + latest data into _site/ and publish to GitHub Pages
+#
+# The data is every station with a market, split into an index plus map tiles that the browser
+# downloads on demand. The big data files live on the `data` branch (a single orphan commit that is replaced each
+# time), so `main` stays small and its git history does not grow by tens of MB per refresh.
+
+on:
+  push:
+    branches: [main, master]
+  schedule:
+    # The Spansh dump is regenerated about daily. Twice a day is plenty; the build is skipped
+    # automatically (a cheap HEAD request) when the dump has not changed.
+    - cron: "15 6,18 * * *"
+  workflow_dispatch:
+    inputs:
+      refresh_data:
+        description: "Rebuild the market data from Spansh now"
+        type: boolean
+        default: true
+      force:
+        description: "Rebuild even if the Spansh dump looks unchanged"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -r requirements.txt
+      - name: JavaScript tests
+        run: node tests/optimizer.test.js
+      - name: Python tests
+        run: python -m unittest discover -s tests -v
+
+  data:
+    needs: test
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.refresh_data)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    concurrency:
+      group: refresh-trade-data
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch previously published data (if any)
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: data
+          path: prev
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      - name: Build dataset
+        env:
+          TD_MAX_AGE_DAYS: "0"             # 0 = keep every station that has a market (all are searchable)
+          TD_CARRIER_MAX_AGE_DAYS: "14"    # fleet carriers move/vanish: drop ones not updated for this long
+          TD_TILE_STATIONS: "2500"         # stations per map tile (~2.5 MB each)
+        run: |
+          set -e
+          ARGS="--out out/trade-data.json"
+          if [ -f prev/trade-data.json ]; then ARGS="$ARGS --previous prev/trade-data.json"; fi
+          if [ "${{ inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
+          python build_data.py $ARGS
+          if [ -f out/trade-data.json ]; then
+            du -sh out
+            ls out | wc -l
+            for f in out/*.json; do
+              SIZE=$(wc -c < "$f")
+              if [ "$SIZE" -gt 95000000 ]; then
+                echo "::error::$f is $SIZE bytes (limit 95 MB). Lower TD_MAX_STATIONS or TD_MAX_SHARD_BYTES."
+                exit 1
+              fi
+            done
+          else
+            echo "No new data was built (upstream unchanged)."
+          fi
+
+      - name: Publish to the data branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          if [ ! -f out/trade-data.json ]; then exit 0; fi
+          cd out
+          git init -q -b data
+          git config user.name "trade-data-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Trade data $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/data
+
+  deploy:
+    needs: [test, data]
+    # Deploy after tests pass, whether or not the data job ran (it is skipped on plain pushes).
+    if: ${{ !cancelled() && needs.test.result == 'success' && needs.data.result != 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch published data
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: data
+          path: _data
+
+      - name: Assemble site
+        run: |
+          set -e
+          mkdir _site
+          cp index.html style.css data.js optimizer.js engine.js worker.js app.js _site/
+          if [ -f _data/trade-data.json ]; then
+            cp _data/trade-*.json _site/
+            echo "Using published market data."
+          else
+            cp trade-*.json _site/
+            echo "::warning::No data branch yet - deploying the bundled sample. Run this workflow manually with 'Rebuild the market data' ticked."
+          fi
+          touch _site/.nojekyll
+          du -sh _site
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
