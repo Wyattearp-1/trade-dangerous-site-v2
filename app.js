@@ -6,6 +6,8 @@
   const fmtCr = (n) => fmtNum(n) + ' cr';
   const STORAGE_KEY = 'td-web-settings-v3';
   const DATA_URL = 'trade-data.json';
+  // Search effort: time budget and the widest beam the search may reach.
+  const EFFORT = { quick: { ms: 2500, width: 12 }, thorough: { ms: 8000, width: 48 }, maximum: { ms: 30000, width: 128 } };
 
   /* ---------------- helpers ---------------- */
 
@@ -275,7 +277,7 @@
 
   const TEXT_FIELDS = ['startStation', 'credits', 'insurance', 'capacity', 'lyPer', 'jumpsPer', 'hops',
     'towardSystem', 'avoidSystems', 'avoidStations', 'avoidCommodities', 'sortBy', 'minProfit',
-    'minRouteProfit', 'padSize', 'maxStationLs', 'maxAge', 'beamWidth', 'maxResults'];
+    'minRouteProfit', 'padSize', 'maxStationLs', 'maxAge', 'effort', 'maxResults'];
   const CHECK_FIELDS = ['loop', 'noRevisit', 'includeOdyssey', 'includeCarriers'];
   const DEFAULTS = {};
 
@@ -292,7 +294,6 @@
   function applySettings(s) {
     TEXT_FIELDS.forEach((id) => { if (s[id] !== undefined && s[id] !== null) $(id).value = s[id]; });
     CHECK_FIELDS.forEach((id) => { if (s[id] !== undefined && s[id] !== null) $(id).checked = String(s[id]) === '1'; });
-    $('beamWidthOut').textContent = $('beamWidth').value;
   }
   function saveSettings() {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(readSettings())); } catch (e) { /* storage unavailable */ }
@@ -526,7 +527,9 @@
         avoidCommodities: splitList($('avoidCommodities').value),
         minProfitPerUnit: Number($('minProfit').value) || 1,
         minRouteProfit: Number($('minRouteProfit').value) || 0,
-        beamWidth: Number($('beamWidth').value),
+        beamWidth: 6,
+        timeBudgetMs: EFFORT[$('effort').value] ? EFFORT[$('effort').value].ms : 8000,
+        maxBeamWidth: EFFORT[$('effort').value] ? EFFORT[$('effort').value].width : 48,
         requirePad: $('padSize').value,
         maxStationLs: Number($('maxStationLs').value) || 0,
         maxAgeHours: Number($('maxAge').value) || 0,
@@ -540,6 +543,10 @@
 
   function regionProgress(statusEl) {
     return (p) => {
+      if (p.phase === 'search') {
+        statusEl.textContent = 'Searching… pass ' + p.pass + (p.note ? ' (' + p.note + ')' : ' (width ' + p.width + ')') + ' · ' + (p.elapsed / 1000).toFixed(1) + 's';
+        return;
+      }
       if (p.phase !== 'tiles') return;
       statusEl.textContent = 'Loading map regions… ' + p.files + '/' + p.filesTotal + ' (' +
         (p.loaded / 1e6).toFixed(1) + (p.total ? ' / ' + (p.total / 1e6).toFixed(1) : '') + ' MB) — cached for next time';
@@ -574,7 +581,7 @@
     try {
       const res = await backend.run(opts, regionProgress(status));
       if (seq !== runSeq) return;
-      status.textContent = 'Evaluated ' + fmtNum(res.stats.stationsConsidered) + ' stations in ' + res.ms + ' ms · start ' + startKey + ' · ' + res.routes.length + ' route(s)';
+      status.textContent = 'Evaluated ' + fmtNum(res.stats.stationsConsidered) + ' stations · ' + res.passes + ' search pass' + (res.passes === 1 ? '' : 'es') + ' (up to width ' + res.width + ') in ' + (res.ms / 1000).toFixed(1) + 's · start ' + startKey + ' · ' + res.routes.length + ' route(s)';
       showWarnings(res.warnings);
       renderRoutes(res.routes, sortBy, maxShow);
     } catch (err) {
@@ -623,7 +630,6 @@
       saveSettings();
       if (lastRoutes.length) renderRoutes(lastRoutes, $('sortBy').value, Math.min(30, Math.max(1, Number($('maxResults').value) || 8)));
     });
-    $('beamWidth').addEventListener('input', () => { $('beamWidthOut').textContent = $('beamWidth').value; });
     $('runForm').addEventListener('change', saveSettings);
     $('shareBtn').addEventListener('click', async () => {
       const ok = await copyText(settingsLink());

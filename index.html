@@ -156,9 +156,13 @@
               <p class="field-hint">Uncheck to use orbital stations only.</p>
             </div>
             <div class="field">
-              <label for="beamWidth">Search width: <output id="beamWidthOut">6</output></label>
-              <input type="range" id="beamWidth" name="beamWidth" min="2" max="16" step="1" value="6">
-              <p class="field-hint">Wider finds richer routes but takes longer.</p>
+              <label for="effort">Search effort</label>
+              <select id="effort" name="effort">
+                <option value="quick">Quick (~2 s)</option>
+                <option value="thorough" selected>Thorough (~8 s)</option>
+                <option value="maximum">Maximum (up to 30 s)</option>
+              </select>
+              <p class="field-hint">Keeps widening the search until the time is up, and also checks stricter price-age windows, so loosening a limit never gives a worse result.</p>
             </div>
             <div class="field">
               <label for="maxResults">Max routes shown</label>
