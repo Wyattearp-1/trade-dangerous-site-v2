@@ -398,35 +398,105 @@
     return bits.join('');
   }
 
-  function stationLinkHtml(st) {
-    const label = escapeHtml(st.key);
-    return '<a class="station-link" href="' + inaraStationUrl(st.key) + '" target="_blank" rel="noopener" title="Open on Inara">' + label + '</a>';
+  function splitKeyUi(key) {
+    const i = key.indexOf('/');
+    return i < 0 ? { system: key, name: '' } : { system: key.slice(0, i), name: key.slice(i + 1) };
   }
 
-  function loadTableHtml(load) {
-    if (!load || !load.length) return '<p class="muted empty-leg">No cargo on this leg (positioning flight).</p>';
+  /** Station name (linked to Inara) with its system in a quieter style. */
+  function stationLinkHtml(st) {
+    const k = splitKeyUi(st.key);
+    return '<a class="station-link" href="' + inaraStationUrl(st.key) + '" target="_blank" rel="noopener" title="Open on Inara"><strong>' +
+      escapeHtml(k.name || k.system) + '</strong></a> <span class="sys">' + escapeHtml(k.name ? k.system : '') + '</span>';
+  }
+
+  function legTotals(load) {
+    let cost = 0, revenue = 0, units = 0;
+    (load || []).forEach((l) => { cost += l.units * l.buy; revenue += l.units * l.sell; units += l.units; });
+    return { cost, revenue, units, profit: revenue - cost };
+  }
+
+  /** What to BUY at the start of a leg. */
+  function buyTableHtml(load) {
     const rows = load.map((l) =>
-      '<tr><td>' + escapeHtml(l.commodity) + '</td>' +
-      '<td class="num">' + fmtNum(l.units) + '</td>' +
+      '<tr><td class="item">' + escapeHtml(l.commodity) + '</td>' +
+      '<td class="num">' + fmtNum(l.units) + ' t</td>' +
       '<td class="num">' + fmtNum(l.buy) + '</td>' +
-      '<td class="num">' + fmtNum(l.sell) + '</td>' +
-      '<td class="num dim">' + fmtNum(l.supply) + '</td>' +
-      '<td class="num dim">' + fmtNum(l.demand) + '</td>' +
-      '<td class="num">+' + fmtNum(l.profit) + '</td></tr>').join('');
+      '<td class="num">' + fmtNum(l.units * l.buy) + '</td>' +
+      '<td class="num dim">' + fmtNum(l.supply) + '</td></tr>').join('');
     return '<div class="table-scroll"><table class="load-table">' +
-      '<thead><tr><th>Commodity</th><th class="num">Units</th><th class="num">Buy</th><th class="num">Sell</th>' +
-      '<th class="num" title="Stock available where you buy">Stock</th><th class="num" title="Demand where you sell">Demand</th><th class="num">Profit</th></tr></thead>' +
-      '<tbody>' + rows + '</tbody></table></div>';
+      '<thead><tr><th>Buy this</th><th class="num">How much</th><th class="num">Price each</th><th class="num">You pay</th>' +
+      '<th class="num" title="How much the station has for sale">In stock</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }
+
+  /** What to SELL at the end of a leg. */
+  function sellTableHtml(load) {
+    const rows = load.map((l) =>
+      '<tr><td class="item">' + escapeHtml(l.commodity) + '</td>' +
+      '<td class="num">' + fmtNum(l.units) + ' t</td>' +
+      '<td class="num">' + fmtNum(l.sell) + '</td>' +
+      '<td class="num">' + fmtNum(l.units * l.sell) + '</td>' +
+      '<td class="num gain">+' + fmtNum(l.profit) + '</td></tr>').join('');
+    return '<div class="table-scroll"><table class="load-table">' +
+      '<thead><tr><th>Sell this</th><th class="num">How much</th><th class="num">Price each</th><th class="num">You get</th>' +
+      '<th class="num">Profit</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }
+
+  function flyHtml(h) {
+    if (h.distLy == null) return '';
+    const to = splitKeyUi(h.to.key);
+    const ls = h.to.distLs ? ' (the station is ' + fmtNum(h.to.distLs) + ' Ls from the star)' : '';
+    if (h.distLy < 0.001) return '<div class="step-fly"><span class="fly-icon" aria-hidden="true">➜</span> Same system: just fly to the next station' + escapeHtml(ls) + '</div>';
+    return '<div class="step-fly"><span class="fly-icon" aria-hidden="true">➜</span> Fly <b>' + h.distLy.toFixed(1) + ' ly</b>' +
+      (h.jumps ? ' (about ' + h.jumps + ' jump' + (h.jumps === 1 ? '' : 's') + ')' : '') + ' to <b>' + escapeHtml(to.system) + '</b>' + escapeHtml(ls) + '</div>';
+  }
+
+  /** One leg: BUY here -> fly -> SELL there. */
+  function hopHtml(h, n, total, opts) {
+    const o = opts || {};
+    const t = legTotals(h.load);
+    const empty = !h.load || !h.load.length;
+    const where = n === 0 ? (o.quick ? '' : ' <span class="here">(your start)</span>') : ' <span class="here">(you are already here)</span>';
+    const buyStep = empty
+      ? '<div class="step step-note"><span class="pill pass">NO CARGO</span> Nothing profitable to carry on this leg. Fly to ' + stationLinkHtml(h.from) + ' and continue.</div>'
+      : '<div class="step step-buy">' +
+          '<div class="step-label"><span class="pill buy">BUY</span> at ' + stationLinkHtml(h.from) + where + '</div>' +
+          (h.from.pad ? '<div class="step-meta">' + stationBadges(h.from) + (h.from.updated ? ' <span class="tag age">prices ' + fmtAge(h.from.updated) + '</span>' : '') + '</div>' : '') +
+          buyTableHtml(h.load) +
+          '<div class="step-sum">You spend <b>' + fmtCr(t.cost) + '</b> on <b>' + fmtNum(t.units) + ' t</b> of cargo.</div>' +
+        '</div>';
+    const sellStep = empty ? '' :
+      '<div class="step step-sell">' +
+        '<div class="step-label"><span class="pill sell">SELL</span> at ' + stationLinkHtml(h.to) + '</div>' +
+        (h.to.pad ? '<div class="step-meta">' + stationBadges(h.to) + (h.to.updated ? ' <span class="tag age">prices ' + fmtAge(h.to.updated) + '</span>' : '') + '</div>' : '') +
+        sellTableHtml(h.load) +
+        '<div class="step-sum">You receive <b>' + fmtCr(t.revenue) + '</b>, a profit of <b class="gain">+' + fmtCr(t.profit) + '</b>.</div>' +
+      '</div>';
+    const title = o.quick ? 'Best load' : 'Leg ' + (n + 1) + ' of ' + total;
+    return '<div class="hop">' +
+      '<div class="hop-head"><span class="hop-num">' + (n + 1) + '</span><span class="hop-title">' + title + '</span>' +
+      '<span class="hop-profit">+' + fmtCr(h.profit) + '</span></div>' +
+      buyStep + flyHtml(h) + sellStep + '</div>';
   }
 
   function routeToText(route, index) {
     const m = routeMetrics(route);
-    const lines = ['Route ' + (index + 1) + ': +' + fmtCr(route.totalProfit) + ' over ' + m.hops + ' hop(s), ' + m.dist.toFixed(1) + ' ly'];
+    const startCr = route.endCredits - route.totalProfit;
+    const lines = ['Route ' + (index + 1) + ': start ' + fmtCr(startCr) + ' -> finish ' + fmtCr(route.endCredits) + ' (+' + fmtCr(route.totalProfit) + ', ' + m.hops + ' leg(s), ' + m.dist.toFixed(1) + ' ly)', ''];
     route.hops.forEach((h, i) => {
-      lines.push((i + 1) + '. ' + h.from.key + ' -> ' + h.to.key + ' (' + h.distLy.toFixed(1) + ' ly)  +' + fmtCr(h.profit));
-      (h.load || []).forEach((l) => lines.push('     ' + l.units + 't ' + l.commodity + ' buy ' + fmtNum(l.buy) + ' / sell ' + fmtNum(l.sell)));
+      lines.push('Leg ' + (i + 1) + ':');
+      if (!h.load || !h.load.length) {
+        lines.push('  (no cargo) fly to ' + h.to.key);
+      } else {
+        lines.push('  BUY at ' + h.from.key);
+        h.load.forEach((l) => lines.push('    ' + l.units + ' t ' + l.commodity + ' @ ' + fmtNum(l.buy) + ' each = ' + fmtNum(l.units * l.buy)));
+        lines.push('  FLY ' + h.distLy.toFixed(1) + ' ly to ' + h.to.key);
+        lines.push('  SELL at ' + h.to.key);
+        h.load.forEach((l) => lines.push('    ' + l.units + ' t ' + l.commodity + ' @ ' + fmtNum(l.sell) + ' each = ' + fmtNum(l.units * l.sell) + '  (+' + fmtNum(l.profit) + ')'));
+      }
+      lines.push('  Leg profit: +' + fmtCr(h.profit), '');
     });
-    return lines.join('\n');
+    return lines.join('\n').trim();
   }
 
   function renderRoutes(routes, sortBy, maxShow) {
@@ -442,7 +512,8 @@
     const toolbar = document.createElement('div');
     toolbar.className = 'results-toolbar';
     toolbar.innerHTML = '<span class="muted">' + ordered.length + ' route' + (ordered.length === 1 ? '' : 's') +
-      ' · sorted by ' + (SORT_LABELS[sortBy] || sortBy) + '</span>';
+      ' · sorted by ' + (SORT_LABELS[sortBy] || sortBy) + '</span>' +
+      '<span class="legend"><span class="pill buy">BUY</span> pick up cargo <span class="pill sell">SELL</span> drop it off for profit</span>';
     container.appendChild(toolbar);
 
     ordered.forEach((route, i) => {
@@ -454,7 +525,7 @@
       head.className = 'route-card-head';
       head.innerHTML =
         '<span>Route ' + (i + 1) + '</span>' +
-        '<span class="route-meta">' + m.hops + ' hop' + (m.hops === 1 ? '' : 's') + ' · ' + m.dist.toFixed(1) + ' ly · ~' + m.jumps + ' jump' + (m.jumps === 1 ? '' : 's') + '</span>' +
+        '<span class="route-meta">' + m.hops + ' leg' + (m.hops === 1 ? '' : 's') + ' · ' + m.dist.toFixed(1) + ' ly · ~' + m.jumps + ' jump' + (m.jumps === 1 ? '' : 's') + '</span>' +
         '<span class="total">+' + fmtCr(route.totalProfit) + '</span>';
       const copyBtn = document.createElement('button');
       copyBtn.type = 'button';
@@ -469,21 +540,17 @@
       head.appendChild(copyBtn);
       card.appendChild(head);
 
-      route.hops.forEach((h, n) => {
-        const hop = document.createElement('div');
-        hop.className = 'hop';
-        hop.innerHTML =
-          '<div class="hop-route">' +
-            '<span class="hop-num">' + (n + 1) + '</span>' +
-            '<span class="hop-stations">' + stationLinkHtml(h.from) + '<span class="hop-arrow" aria-label="to">→</span>' + stationLinkHtml(h.to) + '</span>' +
-            '<span class="dist">' + h.distLy.toFixed(1) + ' ly' + (h.jumps ? ' · ~' + h.jumps + ' jump' + (h.jumps === 1 ? '' : 's') : '') + '</span>' +
-            '<span class="hop-profit">+' + fmtCr(h.profit) + '</span>' +
-          '</div>' +
-          '<div class="hop-meta"><span><span class="muted">Buy at</span> ' + stationBadges(h.from) + ' <span class="tag age">' + fmtAge(h.from.updated) + '</span></span>' +
-          '<span><span class="muted">Sell at</span> ' + stationBadges(h.to) + ' <span class="tag age">' + fmtAge(h.to.updated) + '</span></span></div>' +
-          loadTableHtml(h.load);
-        card.appendChild(hop);
-      });
+      // Plain-language overview (where you go, what you start/finish with), then one block per leg.
+      const stops = [route.hops[0].from].concat(route.hops.map((h) => h.to));
+      const body = document.createElement('div');
+      body.className = 'route-body';
+      body.innerHTML =
+        '<div class="route-overview">' +
+          '<div class="overview-path">' + stops.map((st) => '<span class="stop">' + escapeHtml(splitKeyUi(st.key).name || st.key) + '</span>').join('<span class="hop-arrow" aria-hidden="true">→</span>') + '</div>' +
+          '<div class="overview-cash">Start with <b>' + fmtCr(route.endCredits - route.totalProfit) + '</b> → finish with <b class="gain">' + fmtCr(route.endCredits) + '</b></div>' +
+        '</div>' +
+        route.hops.map((h, n) => hopHtml(h, n, route.hops.length)).join('');
+      card.appendChild(body);
       container.appendChild(card);
     });
   }
@@ -613,10 +680,10 @@
         return;
       }
       container.innerHTML =
-        '<article class="route-card"><div class="route-card-head"><span>' +
-        stationLinkHtml({ key: fromKey }) + ' → ' + stationLinkHtml({ key: toKey }) +
-        '</span><span class="total">+' + fmtCr(res.totalProfit) + '</span></div>' +
-        '<div class="hop">' + loadTableHtml(res.load) + '</div></article>';
+        '<article class="route-card"><div class="route-card-head"><span>Best single trade</span>' +
+        '<span class="total">+' + fmtCr(res.totalProfit) + '</span></div>' +
+        hopHtml({ from: { key: fromKey }, to: { key: toKey }, load: res.load, profit: res.totalProfit, distLy: null }, 0, 1, { quick: true }) +
+        '</article>';
     } catch (err) {
       container.innerHTML = '<p class="status error">' + escapeHtml(err.message) + '</p>';
     }

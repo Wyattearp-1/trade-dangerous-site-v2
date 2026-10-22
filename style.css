@@ -459,3 +459,75 @@ button.secondary.small { padding: 4px 12px; font-size: 0.8rem; border-radius: 7p
   .hop-route .hop-profit { margin-left: 0; }
   .btn-row .primary, .btn-row .secondary { flex: 1 1 100%; }
 }
+
+/* ---------- v3.1: step-by-step legs (BUY -> fly -> SELL) ---------- */
+
+:root { --buy: #5aa9ff; --sell: var(--profit); }
+
+.sys { color: var(--ink-dim); font-size: 0.8rem; }
+.gain { color: var(--profit); }
+.results-toolbar { gap: 8px 16px; flex-wrap: wrap; }
+.legend { font-size: 0.8rem; color: var(--ink-dim); display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+.route-overview {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 159, 46, 0.04);
+  display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; justify-content: space-between;
+}
+.overview-path { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 0.85rem; }
+.overview-path .stop { font-weight: 600; }
+.overview-cash { font-size: 0.85rem; color: var(--ink-dim); }
+.overview-cash b { color: var(--ink); font-family: var(--mono); }
+.overview-cash b.gain { color: var(--profit); }
+
+.hop-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.hop-title { font-weight: 600; font-size: 0.95rem; }
+.hop-head .hop-profit { margin-left: auto; color: var(--profit); font-family: var(--mono); }
+
+.step {
+  border-left: 3px solid var(--line);
+  background: var(--panel-2);
+  border-radius: 0 8px 8px 0;
+  padding: 10px 12px 8px;
+}
+.step-buy { border-left-color: var(--buy); }
+.step-sell { border-left-color: var(--sell); }
+.step-note { border-left-color: var(--ink-dim); font-size: 0.9rem; }
+.step-label { font-size: 0.95rem; margin-bottom: 4px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.step-label .here { color: var(--ink-dim); font-size: 0.8rem; }
+.step-meta { margin-bottom: 6px; font-size: 0.78rem; }
+.step-meta .tag:first-child { margin-left: 0; }
+.step-sum { font-size: 0.88rem; margin-top: 4px; color: var(--ink-dim); }
+.step-sum b { color: var(--ink); font-family: var(--mono); font-weight: 500; }
+.step-sum b.gain { color: var(--profit); }
+.step-fly {
+  margin: 8px 0 8px 3px;
+  padding-left: 12px;
+  font-size: 0.88rem;
+  color: var(--ink-dim);
+}
+.step-fly b { color: var(--ink); }
+.fly-icon { color: var(--amber); margin-right: 4px; }
+
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 3px 8px;
+  border-radius: 5px;
+  border: 1px solid;
+}
+.pill.buy { color: var(--buy); border-color: rgba(90, 169, 255, 0.55); background: rgba(90, 169, 255, 0.1); }
+.pill.sell { color: var(--sell); border-color: rgba(95, 217, 127, 0.55); background: rgba(95, 217, 127, 0.1); }
+.pill.pass { color: var(--ink-dim); border-color: var(--line); }
+
+.load-table td.item { font-weight: 500; }
+.load-table td.num.gain { color: var(--profit); }
+
+@media (max-width: 640px) {
+  .route-overview { padding: 10px 12px; }
+  .step { padding: 8px 10px; }
+}
