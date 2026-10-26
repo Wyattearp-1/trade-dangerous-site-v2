@@ -6,8 +6,8 @@
   const fmtCr = (n) => fmtNum(n) + ' cr';
   const STORAGE_KEY = 'td-web-settings-v3';
   const DATA_URL = 'trade-data.json';
-  // Search effort: time budget and the widest beam the search may reach.
-  const EFFORT = { quick: { ms: 2500, width: 12 }, thorough: { ms: 8000, width: 48 }, maximum: { ms: 30000, width: 128 } };
+  // Search effort: the fixed schedule of beam widths every search runs (never time-based, so results are repeatable).
+  const EFFORT = { quick: { widths: [6, 12] }, thorough: { widths: [6, 12, 24, 48] }, maximum: { widths: [6, 12, 24, 48, 96] } };
 
   /* ---------------- helpers ---------------- */
 
@@ -595,8 +595,7 @@
         minProfitPerUnit: Number($('minProfit').value) || 1,
         minRouteProfit: Number($('minRouteProfit').value) || 0,
         beamWidth: 6,
-        timeBudgetMs: EFFORT[$('effort').value] ? EFFORT[$('effort').value].ms : 8000,
-        maxBeamWidth: EFFORT[$('effort').value] ? EFFORT[$('effort').value].width : 48,
+        widths: (EFFORT[$('effort').value] || EFFORT.thorough).widths,
         requirePad: $('padSize').value,
         maxStationLs: Number($('maxStationLs').value) || 0,
         maxAgeHours: Number($('maxAge').value) || 0,

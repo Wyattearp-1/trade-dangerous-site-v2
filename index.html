@@ -158,11 +158,11 @@
             <div class="field">
               <label for="effort">Search effort</label>
               <select id="effort" name="effort">
-                <option value="quick">Quick (~2 s)</option>
-                <option value="thorough" selected>Thorough (~8 s)</option>
-                <option value="maximum">Maximum (up to 30 s)</option>
+                <option value="quick">Quick (a few seconds)</option>
+                <option value="thorough" selected>Thorough (5–20 s, recommended)</option>
+                <option value="maximum">Maximum (can take a minute or more)</option>
               </select>
-              <p class="field-hint">Keeps widening the search until the time is up, and also checks stricter price-age windows, so loosening a limit never gives a worse result.</p>
+              <p class="field-hint">Runs the same search at every price-age window up to yours, from narrow to wide, so loosening a limit (3 days → 7 days → any) can never give a worse best route. Higher effort searches wider.</p>
             </div>
             <div class="field">
               <label for="maxResults">Max routes shown</label>

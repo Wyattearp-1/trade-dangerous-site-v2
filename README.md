@@ -45,7 +45,7 @@ sample dataset.
 ### Known limits
 
 * Reach per hop is `jump range × max jumps`, measured **in a straight line**; real multi-jump pathing isn't computed.
-* It is a beam search, so it is a very good heuristic but not a proof of optimality. To make it dependable, each run (a) re-searches with a progressively wider beam until the **Search effort** time budget is used or the answer stops improving, and (b) also searches every stricter *max price age* window and pools the results. So loosening a limit (e.g. 3 days → 7 days of data) can never return a worse best route.
+* It is a beam search, so it is a very good heuristic but not a proof of optimality. To make it dependable, each run uses a fixed schedule of beam widths (set by **Search effort**) and runs it over **every price-age window up to the one you chose** (1h, 6h, 24h, 3 days, 7 days, any), pooling the results. A looser setting therefore runs every pass a stricter one runs, so loosening a limit (e.g. 3 days → 7 days → any) can never return a worse best route. The schedule is fixed rather than time-based on purpose, so results are repeatable. Shared caches make the repeated passes cheap.
 * "Head toward" requires each hop to end closer to the target system (or within one jump range of it); it is ignored in loop mode.
 * Prices are a snapshot. Always verify against live prices (every station links to Inara) before you buy.
 

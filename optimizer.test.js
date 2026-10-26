@@ -211,7 +211,7 @@ async function asyncTests() {
     const e2 = createEngine();
     await e2.load('meta.json', () => {});
     global.fetch = realFetch;
-    const opts = Object.assign({}, base, { startKey: 'S/HOME', hops: 2, jumpsPer: 1, lyPer: 20, jumpsPer: 2, capacity: 10, beamWidth: 2, maxBeamWidth: 2, maxResults: 3 });
+    const opts = Object.assign({}, base, { startKey: 'S/HOME', hops: 2, jumpsPer: 1, lyPer: 20, jumpsPer: 2, capacity: 10, widths: [2], maxResults: 3 });
     const strict = await e2.run(Object.assign({}, opts, { maxAgeHours: 24 }));
     const loose = await e2.run(Object.assign({}, opts, { maxAgeHours: 168 }));
     assert.strictEqual(strict.routes[0].totalProfit, 5500, 'strict window finds the good route');

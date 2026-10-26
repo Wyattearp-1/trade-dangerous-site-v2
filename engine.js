@@ -37,14 +37,16 @@
       },
 
       /**
-       * "Best within the limits" search. A single beam search is a heuristic: with more stations in
-       * play it can prune a better route early, so a looser setting (e.g. 7-day data) could score LOWER
-       * than a stricter one (3-day data). To rule that out we
-       *   1. also search every stricter price-age window (they are subsets of the chosen one, so any
-       *      route they find is valid) and pool the results, and
-       *   2. keep re-running the main search with a wider beam until the time budget is used up or the
-       *      answer stops improving.
-       * The best distinct routes from all passes are returned.
+       * "Best within the limits" search.
+       *
+       * A single beam search is a heuristic: with more stations in play it can prune a better route
+       * early, so a looser limit (e.g. 7-day prices) could score LOWER than a stricter one (3-day).
+       * To make "looser is never worse" a guarantee, every search runs the SAME fixed schedule of beam
+       * widths over EVERY price-age window up to the one you chose (1h, 6h, 24h, 3d, 7d, any), and pools
+       * the results. A stricter window's routes are always valid under a looser one, and a looser setting
+       * runs every pass that the stricter setting runs, so its best result can only be equal or better.
+       * (The schedule is fixed, not time-based, on purpose: a time budget would make results depend on
+       * machine speed and break the guarantee. `timeBudgetMs` is only a safety cap.)
        */
       async run(opts, onProgress) {
         if (!DATA) throw new Error('Data not loaded yet');
@@ -58,10 +60,25 @@
         }
 
         const t1 = Date.now();
-        const budget = Math.max(500, opts.timeBudgetMs || 8000);
-        const maxWidth = Math.max(2, opts.maxBeamWidth || 48);
-        const base = Math.min(maxWidth, Math.max(2, opts.beamWidth || 6));
+        const cap = Math.max(1000, opts.timeBudgetMs || 120000);
+        const widths = (opts.widths && opts.widths.length ? opts.widths : [6, 12, 24, 48]).slice().sort((a, b) => a - b);
         const want = Math.max(1, opts.maxResults || 8);
+        const chosen = opts.maxAgeHours || 0;
+
+        // Price-age windows, strictest first, ending with the one the user asked for.
+        const windows = [];
+        if (DATA.hasAges) for (const hrs of AGE_TIERS) { if (chosen !== 0 && hrs >= chosen) break; windows.push(hrs); }
+        windows.push(chosen);
+
+        const ctx = root.TDOptimizer.createContext();
+        const runOpts = Object.assign({}, opts, { _ctx: ctx });
+        // A stricter window that admits exactly the same stations as the next looser one gives identical
+        // results, so skip it (this is lossless).
+        const counts = windows.map((hrs) => root.TDOptimizer.countStations(DATA, Object.assign({}, opts, { maxAgeHours: hrs })));
+        for (let i = windows.length - 2; i >= 0; i--) {
+          if (counts[i] === counts[i + 1]) { windows.splice(i, 1); counts.splice(i, 1); }
+        }
+
         const pool = new Map();
         const addRoutes = (routes) => {
           for (const r of routes) {
@@ -70,49 +87,28 @@
             if (!have || r.totalProfit > have.totalProfit) pool.set(sig, r);
           }
         };
-        const bestOf = () => { let m = 0; for (const r of pool.values()) if (r.totalProfit > m) m = r.totalProfit; return m; };
         const say = (extra) => { if (onProgress) onProgress(Object.assign({ phase: 'search', elapsed: Date.now() - t1 }, extra)); };
-        let passes = 0;
 
-        // 1) stricter price-age windows (all subsets of the chosen window)
-        if (DATA.hasAges) {
-          const chosen = opts.maxAgeHours || 0;
-          for (const hrs of AGE_TIERS) {
-            if (chosen !== 0 && hrs >= chosen) break;
-            if (Date.now() - t1 > budget * 0.4) break;
+        let passes = 0, first = null, lastWidth = widths[0], capped = false;
+        outer:
+        for (const w of widths) {
+          for (const hrs of windows) {
+            if (passes > 0 && Date.now() - t1 > cap) { capped = true; break outer; }
             passes++;
-            say({ pass: passes, width: base, note: 'prices ≤ ' + hrs + 'h' });
-            const r = root.TDOptimizer.findRoutes(DATA, Object.assign({}, opts, { maxAgeHours: hrs, beamWidth: base, branch: Math.max(12, base * 2), maxResults: want }));
+            say({ pass: passes, width: w, note: hrs === chosen ? 'width ' + w : 'width ' + w + ', prices ≤ ' + hrs + 'h' });
+            const r = root.TDOptimizer.findRoutes(DATA, Object.assign({}, runOpts, { maxAgeHours: hrs, beamWidth: w, branch: Math.max(12, w * 2), maxResults: want }));
+            if (hrs === chosen && !first) first = r;
             addRoutes(r.routes);
           }
-        }
-
-        // 2) the requested window with a progressively wider beam
-        let width = base, first = null, noGain = 0, lastWidth = base;
-        for (;;) {
-          const ts = Date.now();
-          const before = bestOf();
-          passes++;
-          say({ pass: passes, width });
-          const r = root.TDOptimizer.findRoutes(DATA, Object.assign({}, opts, { beamWidth: width, branch: Math.max(12, width * 2), maxResults: want }));
-          if (!first) first = r;
-          addRoutes(r.routes);
-          lastWidth = width;
-          noGain = bestOf() > before ? 0 : noGain + 1;
-          const took = Date.now() - ts;
-          const next = width * 2;
-          if (next > maxWidth) break;
-          if (noGain >= 2) break;
-          if (Date.now() - t1 + took * 2.4 > budget) break;
-          width = next;
+          lastWidth = w;
         }
 
         let routes = Array.from(pool.values()).sort((a, b) => b.totalProfit - a.totalProfit || a.totalDist - b.totalDist).slice(0, want);
         if (opts.minRouteProfit > 0) routes = routes.filter((r) => r.totalProfit >= opts.minRouteProfit);
         return {
           routes,
-          warnings: first.warnings,
-          stats: first.stats,
+          warnings: (first || { warnings: [] }).warnings.concat(capped ? ['Search stopped early at the safety time limit; results may not be the best possible.'] : []),
+          stats: (first || { stats: { stationsConsidered: 0 } }).stats,
           passes,
           width: lastWidth,
           ms: Date.now() - t0,

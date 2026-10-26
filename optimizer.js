@@ -13,6 +13,8 @@
   'use strict';
 
   const EPS = 1e-6;
+  const CAND_KEEP = 300;        // destinations remembered per (station, budget) in the per-run cache
+  const CAND_CACHE_MAX = 1500;  // cached station lists per price window (bounds memory)
 
   /** Non-standard market goods (salvage, etc.) - never planned into loads. */
   const SALVAGE_BLOCK = new Set([
@@ -161,10 +163,11 @@
         i++; j++;
       }
     }
-    if (!cands.length) return { picks: [], total: 0, cost: 0 };
+    if (!cands.length) return { picks: [], total: 0, cost: 0, free: true };
 
     cands.sort((x, y) => y.unitProfit - x.unitProfit);
     let best = fill(cands, credits, capacity);
+    const free = !best.cashLimited; // credits never bound: any larger budget gives the identical load
     if (best.cashLimited && cands.length > 1) {
       const tryOrder = (cmp) => {
         const r = fill(cands.slice().sort(cmp), credits, capacity);
@@ -173,7 +176,64 @@
       tryOrder((x, y) => y.unitProfit / y.buy - x.unitProfit / x.buy);
       for (const l of LAMBDAS) tryOrder((x, y) => (y.unitProfit - l * y.buy) - (x.unitProfit - l * x.buy));
     }
-    return { picks: best.picks, total: best.total, cost: best.cost };
+    return { picks: best.picks, total: best.total, cost: best.cost, free };
+  }
+
+
+  /* Allocation-free fast path. Scratch arrays are reused across calls (single-threaded). */
+  const SCRATCH = 1024;
+  const S_BUY = new Int32Array(SCRATCH), S_PROF = new Int32Array(SCRATCH), S_CAP = new Int32Array(SCRATCH), S_IDX = new Int32Array(SCRATCH);
+  let qCost = 0;
+
+  /**
+   * Profit of the best load origin -> dest, without building any objects.
+   * Returns -1 when credits are tight enough that the cost-adjusted orderings in bestLoad() are needed
+   * (the caller then falls back to it); otherwise the margin-ordered fill is already optimal.
+   */
+  function quickLoad(origin, dest, credits, capacity, blocked, minProfit) {
+    const oi = origin.ids, di = dest.ids;
+    const minP = minProfit > 0 ? minProfit : 1;
+    let n = 0, i = 0, j = 0;
+    while (i < oi.length && j < di.length) {
+      const a = oi[i], b = di[j];
+      if (a < b) i++;
+      else if (a > b) j++;
+      else {
+        if (!blocked[a]) {
+          const bp = origin.buy[i], sp = dest.sell[j];
+          if (bp > 0 && sp > 0 && sp - bp >= minP) {
+            if (n >= SCRATCH) return -1;
+            S_BUY[n] = bp; S_PROF[n] = sp - bp;
+            const sup = origin.supply[i], dem = dest.demand[j];
+            S_CAP[n] = sup < dem ? sup : dem;
+            n++;
+          }
+        }
+        i++; j++;
+      }
+    }
+    qCost = 0;
+    if (n === 0) return 0;
+    // insertion sort of indices by margin, best first (n is small)
+    for (let k = 0; k < n; k++) {
+      let m = k;
+      const pk = S_PROF[k];
+      while (m > 0 && S_PROF[S_IDX[m - 1]] < pk) { S_IDX[m] = S_IDX[m - 1]; m--; }
+      S_IDX[m] = k;
+    }
+    let cap = capacity, cash = credits, total = 0;
+    for (let k = 0; k < n && cap > 0; k++) {
+      const x = S_IDX[k];
+      const afford = Math.floor(cash / S_BUY[x]);
+      const want = cap < S_CAP[x] ? cap : S_CAP[x];
+      if (afford < want) return -1; // credits bind -> use the full algorithm
+      if (want <= 0) continue;
+      total += want * S_PROF[x];
+      cap -= want;
+      cash -= want * S_BUY[x];
+      qCost += want * S_BUY[x];
+    }
+    return total;
   }
 
   function describeLoad(picks, commodities) {
@@ -204,10 +264,22 @@
     const lyPerEarly = Math.max(1, opts.lyPer || 20);
     const reach = lyPerEarly * (opts.jumpsPer === 0 ? 0 : (opts.jumpsPer || 2)) * Math.max(1, Math.floor(opts.hops || 2));
     const centerPos = data.systems[startStored.system];
-    const { stations, neighboursWithin, blocked } = prepStations(data, Object.assign({}, opts, { _center: centerPos, _reach: reach }));
-    const byKey = new Map(stations.map((s) => [s.key, s]));
+    // Optional per-run context (opts._ctx) lets repeated passes reuse the filtered station set,
+    // neighbour lists and computed cargo loads instead of rebuilding them every time.
+    const ctx = opts._ctx || null;
+    const prepKey = 'age' + (opts.maxAgeHours || 0);
+    let prep = ctx && ctx.preps.get(prepKey);
+    if (!prep) {
+      prep = prepStations(data, Object.assign({}, opts, { _center: centerPos, _reach: reach }));
+      prep.byKey = new Map(prep.stations.map((s) => [s.key, s]));
+      prep.neighbourCache = new Map();
+      prep.candCache = new Map();
+      if (ctx) ctx.preps.set(prepKey, prep);
+    }
+    const { stations, neighboursWithin, blocked, byKey } = prep;
     const start = byKey.get(opts.startKey);
     if (!start) throw new Error('Starting station has no known system coordinates: ' + opts.startKey);
+    const capacityForMemo = Math.max(1, Math.floor(opts.capacity || 1));
 
     const lyPer = Math.max(1, opts.lyPer || 20);
     const hopRadius = Math.max(0, lyPer * (opts.jumpsPer === 0 ? 0 : (opts.jumpsPer || 2)));
@@ -228,7 +300,36 @@
       else if (opts.loop) { warnings.push('"Head toward" is ignored when looping back to the start.'); towardPos = null; }
     }
 
-    const neighbourCache = new Map();
+    const neighbourCache = prep.neighbourCache;
+
+    /**
+     * Value of the best load from -> to (an object with .total), memoised across every pass of one run.
+     * Only the profit is computed here; the actual cargo list (picks) is built later, and only for the
+     * few routes that survive, via bestLoad().
+     */
+    function loadFor(from, to, spendable) {
+      let row = null;
+      if (ctx) {
+        row = ctx.memo.get(from.key);
+        if (!row) { row = new Map(); ctx.memo.set(from.key, row); }
+        const hit = row.get(to.key);
+        if (hit && (hit.free ? spendable >= hit.cost : spendable === hit.credits)) return hit;
+      }
+      let entry;
+      const t = quickLoad(from, to, spendable, capacityForMemo, blocked, opts.minProfitPerUnit);
+      if (t >= 0) {
+        entry = { free: true, credits: spendable, cost: qCost, total: t };
+      } else {
+        const r = bestLoad(from, to, spendable, capacityForMemo, blocked, opts.minProfitPerUnit);
+        entry = { free: r.free, credits: spendable, cost: r.cost, total: r.total };
+      }
+      if (row) {
+        row.set(to.key, entry);
+        if (++ctx.memoSize > 400000) { ctx.memo.clear(); ctx.memoSize = 0; }
+      }
+      return entry;
+    }
+
     function neighboursOf(st) {
       let n = neighbourCache.get(st.key);
       if (!n) {
@@ -257,28 +358,49 @@
           const d = dist3(here.pos, start.pos);
           if (d > hopRadius + EPS) continue;
           // The return leg is mandatory; an empty run home is acceptable if nothing profitable exists.
-          const r = bestLoad(here, start, spendable, capacity, blocked, opts.minProfitPerUnit);
-          cands.push({ dest: start, dist: d, picks: r.picks, profit: r.total });
+          const r = loadFor(here, start, spendable);
+          cands.push({ dest: start, dist: d, picks: null, profit: r.total });
         } else {
           const remainingAfter = hops - 1 - hop;
-          const hereToTarget = towardPos ? dist3(here.pos, towardPos) : 0;
-          for (const { station: dest, dist } of neighboursOf(here)) {
-            if (opts.noRevisit && partial.visited.has(dest.key)) continue;
-            if (opts.loop && dist3(dest.pos, start.pos) > hopRadius * remainingAfter + EPS) continue;
-            if (towardPos) {
-              const dt = dist3(dest.pos, towardPos);
-              if (!(dt < hereToTarget - 0.01 || dt <= lyPer)) continue;
+          const visitedOk = (c) => !(opts.noRevisit && partial.visited.has(c.dest.key));
+
+          /** Every profitable destination from `here`, best first. Independent of the path taken (except visited). */
+          const build = (keep) => {
+            const all = [];
+            const hereToTarget = towardPos ? dist3(here.pos, towardPos) : 0;
+            for (const { station: dest, dist } of neighboursOf(here)) {
+              if (opts.loop && dist3(dest.pos, start.pos) > hopRadius * remainingAfter + EPS) continue;
+              if (towardPos) {
+                const dt = dist3(dest.pos, towardPos);
+                if (!(dt < hereToTarget - 0.01 || dt <= lyPer)) continue;
+              }
+              const r = loadFor(here, dest, spendable);
+              if (r.total <= 0) continue;
+              all.push({ dest, dist, picks: null, profit: r.total });
             }
-            const r = bestLoad(here, dest, spendable, capacity, blocked, opts.minProfitPerUnit);
-            if (r.total <= 0) continue;
-            cands.push({ dest, dist, picks: r.picks, profit: r.total });
+            all.sort((a, b) => b.profit - a.profit || a.dist - b.dist);
+            return { list: keep && all.length > keep ? all.slice(0, keep) : all, truncated: !!keep && all.length > keep };
+          };
+
+          let entry = null, ckey = null;
+          if (ctx) {
+            ckey = here.key + '|' + spendable + '|' + (opts.loop ? remainingAfter : '');
+            entry = prep.candCache.get(ckey);
+            if (!entry) {
+              entry = build(CAND_KEEP);
+              if (prep.candCache.size >= CAND_CACHE_MAX) prep.candCache.clear();
+              prep.candCache.set(ckey, entry);
+            }
+          } else {
+            entry = build(0);
           }
-          // Rank purely by credits earned on this leg.
-          cands.sort((a, b) => b.profit - a.profit || a.dist - b.dist);
-          cands.length = Math.min(cands.length, branch);
+          let ranked = entry.list.filter(visitedOk);
+          if (ranked.length < branch && entry.truncated) ranked = build(0).list.filter(visitedOk); // rare: cache too short
+          for (let i = 0; i < ranked.length && cands.length < branch; i++) cands.push(ranked[i]);
         }
 
         for (const c of cands) {
+          if (!c.picks) c.picks = bestLoad(here, c.dest, spendable, capacity, blocked, opts.minProfitPerUnit).picks;
           const visited = new Set(partial.visited);
           visited.add(c.dest.key);
           nextBeam.push({
@@ -354,7 +476,17 @@
     return ly * (opts.jumpsPer === 0 ? 0 : (opts.jumpsPer || 2)) * Math.max(1, Math.floor(opts.hops || 2));
   }
 
-  const api = { reachRadius, findRoutes, bestSingleTrade, bestLoad, dist3, isBlockedCommodity };
+  function createContext() { return { preps: new Map(), memo: new Map(), memoSize: 0 }; }
+
+  /** Number of stations a search with these limits could use (cheap; used to skip duplicate windows). */
+  function countStations(data, opts) {
+    const st = data.stations[opts.startKey];
+    if (!st) return 0;
+    const prep = prepStations(data, Object.assign({}, opts, { _center: data.systems[st.system], _reach: reachRadius(opts) }));
+    return prep.stations.length;
+  }
+
+  const api = { createContext, countStations, reachRadius, findRoutes, bestSingleTrade, bestLoad, dist3, isBlockedCommodity };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.TDOptimizer = api;
 })(typeof self !== 'undefined' ? self : this);
