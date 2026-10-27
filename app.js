@@ -277,8 +277,9 @@
 
   const TEXT_FIELDS = ['startStation', 'credits', 'insurance', 'capacity', 'lyPer', 'jumpsPer', 'hops',
     'towardSystem', 'avoidSystems', 'avoidStations', 'avoidCommodities', 'sortBy', 'minProfit',
-    'minRouteProfit', 'padSize', 'maxStationLs', 'maxAge', 'effort', 'maxResults'];
-  const CHECK_FIELDS = ['loop', 'noRevisit', 'includeOdyssey', 'includeCarriers'];
+    'minRouteProfit', 'padSize', 'maxStationLs', 'maxAge', 'effort', 'maxResults',
+    'objective', 'pathMode', 'impact', 'secPerJump', 'secPerStop'];
+  const CHECK_FIELDS = ['loop', 'noRevisit', 'includeOdyssey', 'includeCarriers', 'split'];
   const DEFAULTS = {};
 
   function captureDefaults() {
@@ -365,12 +366,17 @@
 
   function routeMetrics(route) {
     const hops = route.hops || [];
-    const dist = route.totalDist != null ? route.totalDist : hops.reduce((s, h) => s + (h.distLy || 0), 0);
+    const dist = route.totalDist != null ? route.totalDist : hops.reduce((t, h) => t + (h.distLy || 0), 0);
     const n = hops.length || 1;
     let tons = 0;
     let jumps = 0;
     hops.forEach((h) => { jumps += h.jumps || 0; (h.load || []).forEach((l) => { tons += l.units || 0; }); });
-    return { profit: route.totalProfit || 0, dist, hops: n, jumps, profitPerHop: (route.totalProfit || 0) / n, crPerTon: tons > 0 ? route.totalProfit / tons : 0 };
+    return {
+      profit: route.totalProfit || 0, dist, hops: n, jumps,
+      profitPerHop: (route.totalProfit || 0) / n,
+      crPerTon: tons > 0 ? route.totalProfit / tons : 0,
+      rate: route.profitPerHour || 0, seconds: route.totalTime || 0,
+    };
   }
 
   function sortRoutes(routes, sortBy) {
@@ -378,6 +384,7 @@
     const byProfit = (a, b) => b.m.profit - a.m.profit;
     const cmp = {
       profit: byProfit,
+      rate: (a, b) => b.m.rate - a.m.rate || byProfit(a, b),
       profitPerHop: (a, b) => b.m.profitPerHop - a.m.profitPerHop || byProfit(a, b),
       crPerTon: (a, b) => b.m.crPerTon - a.m.crPerTon || byProfit(a, b),
       shortest: (a, b) => a.m.dist - b.m.dist || byProfit(a, b),
@@ -387,7 +394,13 @@
     return scored.map((x) => x.r);
   }
 
-  const SORT_LABELS = { profit: 'total profit', profitPerHop: 'profit per hop', crPerTon: 'CR per ton', shortest: 'shortest distance', fewestHops: 'fewest hops' };
+  const SORT_LABELS = { profit: 'total profit', rate: 'credits per hour', profitPerHop: 'profit per hop', crPerTon: 'CR per ton', shortest: 'shortest distance', fewestHops: 'fewest hops' };
+
+  function fmtDuration(sec) {
+    const m = Math.round(sec / 60);
+    if (m < 60) return m + ' min';
+    return Math.floor(m / 60) + ' h ' + String(m % 60).padStart(2, '0') + ' min';
+  }
 
   function stationBadges(st) {
     const bits = [];
@@ -412,87 +425,128 @@
 
   function legTotals(load) {
     let cost = 0, revenue = 0, units = 0;
-    (load || []).forEach((l) => { cost += l.units * l.buy; revenue += l.units * l.sell; units += l.units; });
+    (load || []).forEach((l) => { cost += l.units * (l.buyAvg != null ? l.buyAvg : l.buy); revenue += l.units * (l.sellAvg != null ? l.sellAvg : l.sell); units += l.units; });
     return { cost, revenue, units, profit: revenue - cost };
   }
 
-  /** What to BUY at the start of a leg. */
+  /** A price cell: the average you would actually get, with the listed price underneath when they differ. */
+  function priceCell(avg, listed) {
+    const a = avg != null ? avg : listed;
+    const differs = listed != null && Math.abs(a - listed) / Math.max(1, listed) > 0.005;
+    return '<td class="num">' + fmtNum(a) + (differs ? '<span class="listed">listed ' + fmtNum(listed) + '</span>' : '') + '</td>';
+  }
+
+  /** What to BUY at the start of a leg (one row per commodity even if it is sold at two stops). */
   function buyTableHtml(load) {
-    const rows = load.map((l) =>
+    const byName = new Map();
+    load.forEach((l) => {
+      const row = byName.get(l.commodity) || { commodity: l.commodity, units: 0, buy: l.buy, buyAvg: l.buyAvg != null ? l.buyAvg : l.buy, supply: l.supply };
+      row.units += l.units;
+      byName.set(l.commodity, row);
+    });
+    const rows = Array.from(byName.values()).map((l) =>
       '<tr><td class="item">' + escapeHtml(l.commodity) + '</td>' +
       '<td class="num">' + fmtNum(l.units) + ' t</td>' +
-      '<td class="num">' + fmtNum(l.buy) + '</td>' +
-      '<td class="num">' + fmtNum(l.units * l.buy) + '</td>' +
+      priceCell(l.buyAvg, l.buy) +
+      '<td class="num">' + fmtNum(l.units * l.buyAvg) + '</td>' +
       '<td class="num dim">' + fmtNum(l.supply) + '</td></tr>').join('');
     return '<div class="table-scroll"><table class="load-table">' +
       '<thead><tr><th>Buy this</th><th class="num">How much</th><th class="num">Price each</th><th class="num">You pay</th>' +
       '<th class="num" title="How much the station has for sale">In stock</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
   }
 
-  /** What to SELL at the end of a leg. */
+  /** What to SELL at one stop. */
   function sellTableHtml(load) {
     const rows = load.map((l) =>
       '<tr><td class="item">' + escapeHtml(l.commodity) + '</td>' +
       '<td class="num">' + fmtNum(l.units) + ' t</td>' +
-      '<td class="num">' + fmtNum(l.sell) + '</td>' +
-      '<td class="num">' + fmtNum(l.units * l.sell) + '</td>' +
+      priceCell(l.sellAvg, l.sell) +
+      '<td class="num">' + fmtNum(l.units * (l.sellAvg != null ? l.sellAvg : l.sell)) + '</td>' +
       '<td class="num gain">+' + fmtNum(l.profit) + '</td></tr>').join('');
     return '<div class="table-scroll"><table class="load-table">' +
       '<thead><tr><th>Sell this</th><th class="num">How much</th><th class="num">Price each</th><th class="num">You get</th>' +
       '<th class="num">Profit</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
   }
 
-  function flyHtml(h) {
-    if (h.distLy == null) return '';
-    const to = splitKeyUi(h.to.key);
-    const ls = h.to.distLs ? ' (the station is ' + fmtNum(h.to.distLs) + ' Ls from the star)' : '';
-    if (h.distLy < 0.001) return '<div class="step-fly"><span class="fly-icon" aria-hidden="true">➜</span> Same system: just fly to the next station' + escapeHtml(ls) + '</div>';
-    return '<div class="step-fly"><span class="fly-icon" aria-hidden="true">➜</span> Fly <b>' + h.distLy.toFixed(1) + ' ly</b>' +
-      (h.jumps ? ' (about ' + h.jumps + ' jump' + (h.jumps === 1 ? '' : 's') + ')' : '') + ' to <b>' + escapeHtml(to.system) + '</b>' + escapeHtml(ls) + '</div>';
+  /** "Fly 12.3 ly (2 jumps) to SYSTEM" plus, when known, the systems to jump through. */
+  function flyHtml(seg) {
+    if (!seg || seg.distLy == null) return '';
+    const to = splitKeyUi(seg.to.key);
+    const ls = seg.to.distLs ? ' (the station is ' + fmtNum(seg.to.distLs) + ' Ls from the star)' : '';
+    if (seg.distLy < 0.001) return '<div class="step-fly"><span class="fly-icon" aria-hidden="true">➜</span> Same system: just fly to the next station' + escapeHtml(ls) + '</div>';
+    const route = seg.path && seg.path.length > 2
+      ? '<div class="jump-path">Jump route: ' + seg.path.map((n) => '<span class="stop">' + escapeHtml(n) + '</span>').join('<span class="hop-arrow" aria-hidden="true"> → </span>') + '</div>'
+      : '';
+    return '<div class="step-fly"><span class="fly-icon" aria-hidden="true">➜</span> Fly <b>' + seg.distLy.toFixed(1) + ' ly</b>' +
+      (seg.jumps ? ' (' + seg.jumps + ' jump' + (seg.jumps === 1 ? '' : 's') + ')' : '') + ' to <b>' + escapeHtml(to.system) + '</b>' + escapeHtml(ls) + route + '</div>';
   }
 
-  /** One leg: BUY here -> fly -> SELL there. */
+  /** One leg: BUY here -> fly -> SELL there (and, for split cargo, -> fly -> SELL at a second stop). */
   function hopHtml(h, n, total, opts) {
     const o = opts || {};
-    const t = legTotals(h.load);
-    const empty = !h.load || !h.load.length;
+    const segments = h.segments && h.segments.length ? h.segments : [{ to: h.to, distLy: h.distLy, jumps: h.jumps, path: null }];
+    const load = h.load || [];
+    const t = legTotals(load);
+    const empty = !load.length;
     const where = n === 0 ? (o.quick ? '' : ' <span class="here">(your start)</span>') : ' <span class="here">(you are already here)</span>';
     const buyStep = empty
       ? '<div class="step step-note"><span class="pill pass">NO CARGO</span> Nothing profitable to carry on this leg. Fly to ' + stationLinkHtml(h.from) + ' and continue.</div>'
       : '<div class="step step-buy">' +
           '<div class="step-label"><span class="pill buy">BUY</span> at ' + stationLinkHtml(h.from) + where + '</div>' +
           (h.from.pad ? '<div class="step-meta">' + stationBadges(h.from) + (h.from.updated ? ' <span class="tag age">prices ' + fmtAge(h.from.updated) + '</span>' : '') + '</div>' : '') +
-          buyTableHtml(h.load) +
+          buyTableHtml(load) +
           '<div class="step-sum">You spend <b>' + fmtCr(t.cost) + '</b> on <b>' + fmtNum(t.units) + ' t</b> of cargo.</div>' +
         '</div>';
-    const sellStep = empty ? '' :
-      '<div class="step step-sell">' +
-        '<div class="step-label"><span class="pill sell">SELL</span> at ' + stationLinkHtml(h.to) + '</div>' +
-        (h.to.pad ? '<div class="step-meta">' + stationBadges(h.to) + (h.to.updated ? ' <span class="tag age">prices ' + fmtAge(h.to.updated) + '</span>' : '') + '</div>' : '') +
-        sellTableHtml(h.load) +
-        '<div class="step-sum">You receive <b>' + fmtCr(t.revenue) + '</b>, a profit of <b class="gain">+' + fmtCr(t.profit) + '</b>.</div>' +
-      '</div>';
-    const title = o.quick ? 'Best load' : 'Leg ' + (n + 1) + ' of ' + total;
+    let sellSteps = '';
+    if (!empty) {
+      segments.forEach((seg, si) => {
+        const part = load.filter((l) => (l.at || 0) === si);
+        const pt = legTotals(part);
+        const label = segments.length > 1 ? 'SELL <span class="part">part ' + (si + 1) + ' of ' + segments.length + '</span>' : 'SELL';
+        sellSteps += flyHtml(seg) +
+          '<div class="step step-sell">' +
+            '<div class="step-label"><span class="pill sell">' + label + '</span> at ' + stationLinkHtml(seg.to) + '</div>' +
+            (seg.to.pad ? '<div class="step-meta">' + stationBadges(seg.to) + (seg.to.updated ? ' <span class="tag age">prices ' + fmtAge(seg.to.updated) + '</span>' : '') + '</div>' : '') +
+            (part.length ? sellTableHtml(part) : '<p class="muted empty-leg">Nothing sold here.</p>') +
+            '<div class="step-sum">You receive <b>' + fmtCr(pt.revenue) + '</b>' +
+              (segments.length > 1 ? ' for this part.' : ', a profit of <b class="gain">+' + fmtCr(t.profit) + '</b>.') + '</div>' +
+          '</div>';
+      });
+      if (segments.length > 1) sellSteps += '<div class="step-sum leg-total">Leg total: spend <b>' + fmtCr(t.cost) + '</b>, receive <b>' + fmtCr(t.revenue) + '</b>, profit <b class="gain">+' + fmtCr(t.profit) + '</b>.</div>';
+    } else {
+      sellSteps = flyHtml(segments[segments.length - 1]);
+    }
+    const title = o.quick ? 'Best load' : 'Leg ' + (n + 1) + ' of ' + total + (h.timeSec ? ' · ~' + fmtDuration(h.timeSec) : '');
     return '<div class="hop">' +
       '<div class="hop-head"><span class="hop-num">' + (n + 1) + '</span><span class="hop-title">' + title + '</span>' +
       '<span class="hop-profit">+' + fmtCr(h.profit) + '</span></div>' +
-      buyStep + flyHtml(h) + sellStep + '</div>';
+      buyStep + sellSteps + '</div>';
   }
 
   function routeToText(route, index) {
     const m = routeMetrics(route);
     const startCr = route.endCredits - route.totalProfit;
-    const lines = ['Route ' + (index + 1) + ': start ' + fmtCr(startCr) + ' -> finish ' + fmtCr(route.endCredits) + ' (+' + fmtCr(route.totalProfit) + ', ' + m.hops + ' leg(s), ' + m.dist.toFixed(1) + ' ly)', ''];
+    const lines = ['Route ' + (index + 1) + ': start ' + fmtCr(startCr) + ' -> finish ' + fmtCr(route.endCredits) +
+      ' (+' + fmtCr(route.totalProfit) + ', ' + m.hops + ' leg(s), ' + m.dist.toFixed(1) + ' ly' +
+      (m.seconds ? ', ~' + fmtDuration(m.seconds) + ', ~' + fmtNum(m.rate) + ' cr/hour' : '') + ')', ''];
     route.hops.forEach((h, i) => {
       lines.push('Leg ' + (i + 1) + ':');
       if (!h.load || !h.load.length) {
         lines.push('  (no cargo) fly to ' + h.to.key);
       } else {
+        const segs = h.segments && h.segments.length ? h.segments : [{ to: h.to, distLy: h.distLy, path: null }];
         lines.push('  BUY at ' + h.from.key);
-        h.load.forEach((l) => lines.push('    ' + l.units + ' t ' + l.commodity + ' @ ' + fmtNum(l.buy) + ' each = ' + fmtNum(l.units * l.buy)));
-        lines.push('  FLY ' + h.distLy.toFixed(1) + ' ly to ' + h.to.key);
-        lines.push('  SELL at ' + h.to.key);
-        h.load.forEach((l) => lines.push('    ' + l.units + ' t ' + l.commodity + ' @ ' + fmtNum(l.sell) + ' each = ' + fmtNum(l.units * l.sell) + '  (+' + fmtNum(l.profit) + ')'));
+        const buys = new Map();
+        h.load.forEach((l) => { const r = buys.get(l.commodity) || { units: 0, avg: l.buyAvg != null ? l.buyAvg : l.buy }; r.units += l.units; buys.set(l.commodity, r); });
+        buys.forEach((r, name) => lines.push('    ' + r.units + ' t ' + name + ' @ ' + fmtNum(r.avg) + ' each = ' + fmtNum(r.units * r.avg)));
+        segs.forEach((seg, si) => {
+          lines.push('  FLY ' + (seg.distLy != null ? seg.distLy.toFixed(1) + ' ly ' : '') + 'to ' + seg.to.key + (seg.path && seg.path.length > 2 ? '  [' + seg.path.join(' > ') + ']' : ''));
+          lines.push('  SELL' + (segs.length > 1 ? ' (part ' + (si + 1) + ')' : '') + ' at ' + seg.to.key);
+          h.load.filter((l) => (l.at || 0) === si).forEach((l) => {
+            const sp = l.sellAvg != null ? l.sellAvg : l.sell;
+            lines.push('    ' + l.units + ' t ' + l.commodity + ' @ ' + fmtNum(sp) + ' each = ' + fmtNum(l.units * sp) + '  (+' + fmtNum(l.profit) + ')');
+          });
+        });
       }
       lines.push('  Leg profit: +' + fmtCr(h.profit), '');
     });
@@ -525,7 +579,8 @@
       head.className = 'route-card-head';
       head.innerHTML =
         '<span>Route ' + (i + 1) + '</span>' +
-        '<span class="route-meta">' + m.hops + ' leg' + (m.hops === 1 ? '' : 's') + ' · ' + m.dist.toFixed(1) + ' ly · ~' + m.jumps + ' jump' + (m.jumps === 1 ? '' : 's') + '</span>' +
+        '<span class="route-meta">' + m.hops + ' leg' + (m.hops === 1 ? '' : 's') + ' · ' + m.dist.toFixed(1) + ' ly · ' + m.jumps + ' jump' + (m.jumps === 1 ? '' : 's') +
+          (m.seconds ? ' · ~' + fmtDuration(m.seconds) + ' · <b>' + fmtNum(m.rate) + ' cr/h</b>' : '') + '</span>' +
         '<span class="total">+' + fmtCr(route.totalProfit) + '</span>';
       const copyBtn = document.createElement('button');
       copyBtn.type = 'button';
@@ -541,7 +596,8 @@
       card.appendChild(head);
 
       // Plain-language overview (where you go, what you start/finish with), then one block per leg.
-      const stops = [route.hops[0].from].concat(route.hops.map((h) => h.to));
+      const stops = [route.hops[0].from];
+      route.hops.forEach((h) => (h.segments && h.segments.length ? h.segments : [{ to: h.to }]).forEach((sg) => stops.push(sg.to)));
       const body = document.createElement('div');
       body.className = 'route-body';
       body.innerHTML =
@@ -595,12 +651,18 @@
         minProfitPerUnit: Number($('minProfit').value) || 1,
         minRouteProfit: Number($('minRouteProfit').value) || 0,
         beamWidth: 6,
+        objective: $('objective').value === 'rate' ? 'rate' : 'profit',
+        pathMode: $('pathMode').value === 'line' ? 'line' : 'graph',
+        impact: Number($('impact').value) || 0,
+        split: $('split').checked,
+        secPerJump: Number($('secPerJump').value),
+        secPerStop: Number($('secPerStop').value),
         widths: (EFFORT[$('effort').value] || EFFORT.thorough).widths,
         requirePad: $('padSize').value,
         maxStationLs: Number($('maxStationLs').value) || 0,
         maxAgeHours: Number($('maxAge').value) || 0,
         // Other sort orders pick from a bigger pool of top-earning routes.
-        maxResults: sortBy === 'profit' ? maxResults : Math.min(60, maxResults * 4),
+        maxResults: (sortBy === 'profit' || sortBy === 'rate') ? maxResults : Math.min(60, maxResults * 4),
       },
       sortBy,
       maxShow: maxResults,
@@ -670,6 +732,7 @@
       container.innerHTML = '<p class="status">Loading…</p>';
       const res = await backend.quick({
         fromKey, toKey, credits: Number($('qCredits').value), capacity: Number($('qCapacity').value),
+        opts: { impact: Number($('impact').value) || 0 },
       }, regionProgress(container.firstChild || container));
       if (!res.load.length) {
         const rev = res.reverseProfit
@@ -681,7 +744,7 @@
       container.innerHTML =
         '<article class="route-card"><div class="route-card-head"><span>Best single trade</span>' +
         '<span class="total">+' + fmtCr(res.totalProfit) + '</span></div>' +
-        hopHtml({ from: { key: fromKey }, to: { key: toKey }, load: res.load, profit: res.totalProfit, distLy: null }, 0, 1, { quick: true }) +
+        hopHtml({ from: { key: fromKey }, to: { key: toKey }, load: res.load, profit: res.totalProfit, distLy: null, segments: [{ to: { key: toKey }, distLy: null, jumps: 0, path: null }] }, 0, 1, { quick: true }) +
         '</article>';
     } catch (err) {
       container.innerHTML = '<p class="status error">' + escapeHtml(err.message) + '</p>';
@@ -695,6 +758,11 @@
     $('sortBy').addEventListener('change', () => {
       saveSettings();
       if (lastRoutes.length) renderRoutes(lastRoutes, $('sortBy').value, Math.min(30, Math.max(1, Number($('maxResults').value) || 8)));
+    });
+    $('objective').addEventListener('change', () => {
+      // Searching for credits/hour is pointless if results are then ordered by total profit.
+      $('sortBy').value = $('objective').value === 'rate' ? 'rate' : 'profit';
+      $('sortBy').dispatchEvent(new Event('change', { bubbles: true }));
     });
     $('runForm').addEventListener('change', saveSettings);
     $('shareBtn').addEventListener('click', async () => {

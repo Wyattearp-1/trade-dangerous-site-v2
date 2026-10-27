@@ -104,7 +104,14 @@
       return out;
     }
 
-    return { stations, neighboursWithin, blocked };
+    const bySystem = new Map();
+    for (const st of stations) {
+      let list = bySystem.get(st.system);
+      if (!list) bySystem.set(st.system, (list = []));
+      list.push(st);
+    }
+
+    return { stations, neighboursWithin, blocked, bySystem };
   }
 
   /* ---------------- cargo loading ---------------- */
@@ -236,15 +243,272 @@
     return total;
   }
 
-  function describeLoad(picks, commodities) {
-    return picks.map(({ c, units }) => ({
-      commodity: commodities[c.id], units, buy: c.buy, sell: c.sell,
-      profit: units * c.unitProfit, supply: c.supply, demand: c.demand,
-    }));
+  /* ------------------------------------------------------------------------------------------
+   * Market price impact.
+   * Elite does not publish its pricing formula, so this is an ESTIMATE: buying raises the unit price
+   * linearly with the share of the station's stock you take, and selling lowers it linearly with the
+   * share of its demand you fill. With strength k the average price over x units is
+   *   buy  = p * (1 + k * x / (2 * stock))        sell = s * (1 - k * x / (2 * demand))
+   * (k = 0 reproduces the plain "listed price" model.) Cargo is allocated in ~24 chunks, always to
+   * the commodity with the best marginal margin at that moment.
+   * ---------------------------------------------------------------------------------------- */
+  const IM_MAX = 512;
+  const A_ID = new Int32Array(IM_MAX);
+  const A_P = new Float64Array(IM_MAX), A_S = new Float64Array(IM_MAX), A_SUP = new Float64Array(IM_MAX);
+  const A_DEM = new Float64Array(IM_MAX), A_CAP = new Float64Array(IM_MAX), A_X = new Float64Array(IM_MAX);
+  let iCost = 0, iFree = true;
+
+  function impactRun(n, capacity, credits, k, u, mode) {
+    for (let i = 0; i < n; i++) A_X[i] = 0;
+    let cap = capacity, cash = credits, limited = false;
+    while (cap > 0) {
+      let best = -1, bestScore = 0, bestUnits = 0, bestAvgBuy = 0;
+      for (let i = 0; i < n; i++) {
+        const room = A_CAP[i] - A_X[i];
+        if (room <= 0) continue;
+        let units = u < cap ? u : cap;
+        if (units > room) units = room;
+        let mid = A_X[i] + units / 2;
+        let avgBuy = A_P[i] * (1 + k * mid / A_SUP[i]);
+        const margin0 = A_S[i] * (1 - k * mid / A_DEM[i]) - avgBuy;
+        if (margin0 <= 0) continue;
+        if (units * avgBuy > cash) {
+          limited = true;
+          units = Math.floor(cash / avgBuy);
+          if (units <= 0) continue;
+          mid = A_X[i] + units / 2;
+          avgBuy = A_P[i] * (1 + k * mid / A_SUP[i]);
+        }
+        const score = mode === 0 ? margin0 : margin0 / avgBuy;
+        if (score > bestScore) { best = i; bestScore = score; bestUnits = units; bestAvgBuy = avgBuy; }
+      }
+      if (best < 0) break;
+      A_X[best] += bestUnits;
+      cap -= bestUnits;
+      cash -= bestUnits * bestAvgBuy;
+    }
+    return limited;
+  }
+
+  /**
+   * Best load origin -> dest under price impact k. Returns the profit (a number) and sets iCost / iFree,
+   * or, with wantPicks, { total, cost, free, picks }.
+   */
+  function impactLoad(origin, dest, credits, capacity, blocked, minProfit, k, wantPicks) {
+    const oi = origin.ids, di = dest.ids;
+    const minP = minProfit > 0 ? minProfit : 1;
+    let n = 0, i = 0, j = 0;
+    while (i < oi.length && j < di.length) {
+      const a = oi[i], b = di[j];
+      if (a < b) i++;
+      else if (a > b) j++;
+      else {
+        if (!blocked[a]) {
+          const bp = origin.buy[i], sp = dest.sell[j];
+          if (bp > 0 && sp > 0 && sp - bp >= minP && n < IM_MAX) {
+            const sup = origin.supply[i], dem = dest.demand[j];
+            A_ID[n] = a; A_P[n] = bp; A_S[n] = sp; A_SUP[n] = sup; A_DEM[n] = dem;
+            A_CAP[n] = sup < dem ? sup : dem;
+            n++;
+          }
+        }
+        i++; j++;
+      }
+    }
+    if (n === 0) {
+      iCost = 0; iFree = true;
+      return wantPicks ? { total: 0, cost: 0, free: true, picks: [] } : 0;
+    }
+    const u = Math.max(1, Math.ceil(capacity / 24));
+    const totals = (() => {
+      let total = 0, cost = 0;
+      for (let q = 0; q < n; q++) {
+        const x = A_X[q];
+        if (x <= 0) continue;
+        const ab = A_P[q] * (1 + k * x / (2 * A_SUP[q]));
+        const as = A_S[q] * (1 - k * x / (2 * A_DEM[q]));
+        total += x * (as - ab); cost += x * ab;
+      }
+      return { total, cost };
+    });
+    let limited = impactRun(n, capacity, credits, k, u, 0);
+    let t = totals();
+    let bestTotal = t.total, bestCost = t.cost, bestMode = 0, lastMode = 0;
+    iFree = !limited;
+    if (limited) {
+      impactRun(n, capacity, credits, k, u, 1);
+      lastMode = 1;
+      const t1 = totals();
+      if (t1.total > bestTotal) { bestTotal = t1.total; bestCost = t1.cost; bestMode = 1; }
+    }
+    iCost = bestCost;
+    const total = Math.round(bestTotal);
+    if (!wantPicks) return total;
+    if (lastMode !== bestMode) impactRun(n, capacity, credits, k, u, bestMode);
+    const picks = [];
+    for (let q = 0; q < n; q++) {
+      const x = A_X[q];
+      if (x <= 0) continue;
+      const ab = A_P[q] * (1 + k * x / (2 * A_SUP[q]));
+      const as = A_S[q] * (1 - k * x / (2 * A_DEM[q]));
+      picks.push({ id: A_ID[q], units: x, buy: A_P[q], sell: A_S[q], buyAvg: ab, sellAvg: as, profit: Math.round(x * (as - ab)), supply: A_SUP[q], demand: A_DEM[q], at: 0 });
+    }
+    return { total, cost: bestCost, free: iFree, picks };
+  }
+
+  /**
+   * Best load that is split between TWO selling stops B and C (one hold, two destinations).
+   * A commodity can be sold at either; its stock is shared. Returns { total, cost, picks } where each
+   * pick has st = 0 (sold at B) or 1 (sold at C).
+   */
+  function splitLoad(origin, B, C, credits, capacity, blocked, minProfit, k) {
+    const minP = minProfit > 0 ? minProfit : 1;
+    const bIdx = new Map(), cIdx = new Map();
+    for (let q = 0; q < B.ids.length; q++) bIdx.set(B.ids[q], q);
+    for (let q = 0; q < C.ids.length; q++) cIdx.set(C.ids[q], q);
+    const comms = [], lots = [];
+    for (let q = 0; q < origin.ids.length; q++) {
+      const id = origin.ids[q], bp = origin.buy[q];
+      if (blocked[id] || bp <= 0) continue;
+      const sup = origin.supply[q];
+      const ci = comms.length;
+      let any = false;
+      for (let st = 0; st < 2; st++) {
+        const D = st ? C : B, jj = (st ? cIdx : bIdx).get(id);
+        if (jj === undefined) continue;
+        const sp = D.sell[jj];
+        if (sp <= 0 || sp - bp < minP) continue;
+        const dem = D.demand[jj];
+        lots.push({ ci, st, sp, dem, cap: Math.min(sup, dem) });
+        any = true;
+      }
+      if (any) comms.push({ id, bp, sup });
+    }
+    if (!lots.length) return { total: 0, cost: 0, picks: [] };
+    const u = Math.max(1, Math.ceil(capacity / 24));
+
+    function run(mode) {
+      const x = new Float64Array(lots.length), bought = new Float64Array(comms.length);
+      let cap = capacity, cash = credits, limited = false;
+      while (cap > 0) {
+        let best = -1, bestScore = 0, bestUnits = 0, bestAvgBuy = 0;
+        for (let li = 0; li < lots.length; li++) {
+          const L = lots[li], cm = comms[L.ci];
+          const room = Math.min(L.cap - x[li], cm.sup - bought[L.ci]);
+          if (room <= 0) continue;
+          let units = Math.min(u, cap, room);
+          let avgBuy = cm.bp * (1 + k * (bought[L.ci] + units / 2) / cm.sup);
+          const margin0 = L.sp * (1 - k * (x[li] + units / 2) / L.dem) - avgBuy;
+          if (margin0 <= 0) continue;
+          if (units * avgBuy > cash) {
+            limited = true;
+            units = Math.floor(cash / avgBuy);
+            if (units <= 0) continue;
+            avgBuy = cm.bp * (1 + k * (bought[L.ci] + units / 2) / cm.sup);
+          }
+          const score = mode === 0 ? margin0 : margin0 / avgBuy;
+          if (score > bestScore) { best = li; bestScore = score; bestUnits = units; bestAvgBuy = avgBuy; }
+        }
+        if (best < 0) break;
+        x[best] += bestUnits; bought[lots[best].ci] += bestUnits;
+        cap -= bestUnits; cash -= bestUnits * bestAvgBuy;
+      }
+      let total = 0, cost = 0;
+      for (let li = 0; li < lots.length; li++) {
+        if (x[li] <= 0) continue;
+        const L = lots[li], cm = comms[L.ci];
+        const ab = cm.bp * (1 + k * bought[L.ci] / (2 * cm.sup));
+        const as = L.sp * (1 - k * x[li] / (2 * L.dem));
+        total += x[li] * (as - ab);
+      }
+      for (let ci = 0; ci < comms.length; ci++) cost += bought[ci] * comms[ci].bp * (1 + k * bought[ci] / (2 * comms[ci].sup));
+      return { total, cost, x, bought, limited };
+    }
+    let best = run(0);
+    if (best.limited) { const r1 = run(1); if (r1.total > best.total) best = r1; }
+    const picks = [];
+    for (let li = 0; li < lots.length; li++) {
+      const x = best.x[li];
+      if (x <= 0) continue;
+      const L = lots[li], cm = comms[L.ci];
+      const ab = cm.bp * (1 + k * best.bought[L.ci] / (2 * cm.sup));
+      const as = L.sp * (1 - k * x / (2 * L.dem));
+      picks.push({ id: cm.id, units: x, st: L.st, buy: cm.bp, sell: L.sp, buyAvg: ab, sellAvg: as, profit: Math.round(x * (as - ab)), supply: cm.sup, demand: L.dem });
+    }
+    return { total: Math.round(best.total), cost: best.cost, picks };
+  }
+
+  /** Turn picks (either bestLoad's {c, units} or the flat impact/split form) into output rows. */
+  function describeLoad(picks, commodities, atOf) {
+    return picks.map((p) => {
+      if (p.c) {
+        return { commodity: commodities[p.c.id], units: p.units, buy: p.c.buy, sell: p.c.sell, buyAvg: p.c.buy, sellAvg: p.c.sell,
+          profit: p.units * p.c.unitProfit, supply: p.c.supply, demand: p.c.demand, at: 0 };
+      }
+      return { commodity: commodities[p.id], units: p.units, buy: p.buy, sell: p.sell, buyAvg: p.buyAvg, sellAvg: p.sellAvg,
+        profit: p.profit, supply: p.supply, demand: p.demand, at: atOf ? atOf(p) : (p.at || 0) };
+    });
   }
 
   function slim(s) {
     return { key: s.key, name: s.name, system: s.system, pad: s.pad, distLs: s.distLs, planetary: s.planetary, carrier: s.carrier, updated: s.updated };
+  }
+
+  /* ---------------- time model (estimates, all adjustable) ---------------- */
+
+  /** Seconds to cross a system to a station `ls` light-seconds from the star (supercruise). */
+  function scTime(ls) { return 25 + 1.25 * Math.sqrt(Math.max(0, ls || 0)); }
+
+  /* ---------------- real jump paths ---------------- */
+
+  function sysCell(p, cell) { return Math.floor(p.x / cell) + ',' + Math.floor(p.y / cell) + ',' + Math.floor(p.z / cell); }
+
+  /** Grid of every known system near the route (not only ones with usable markets: any star is a waypoint). */
+  function buildSysGrid(data, center, limit, cell) {
+    const grid = new Map();
+    for (const name of Object.keys(data.systems)) {
+      const p = data.systems[name];
+      if (center && dist3(p, center) > limit) continue;
+      const k = sysCell(p, cell);
+      let b = grid.get(k);
+      if (!b) grid.set(k, (b = []));
+      b.push({ name, x: p.x, y: p.y, z: p.z });
+    }
+    return { grid, cell };
+  }
+
+  /** Fewest-jumps tree from one system: Map(system -> { j: jumps, prev }) up to maxJumps, jumps <= range ly. */
+  function bfsTree(sg, data, fromName, range, maxJumps) {
+    const tree = new Map();
+    tree.set(fromName, { j: 0, prev: null });
+    if (maxJumps <= 0) return tree;
+    const r2 = (range + EPS) * (range + EPS), cell = sg.cell;
+    let frontier = [fromName];
+    for (let depth = 1; depth <= maxJumps && frontier.length; depth++) {
+      const next = [];
+      for (const s of frontier) {
+        const p = data.systems[s];
+        const cx = Math.floor(p.x / cell), cy = Math.floor(p.y / cell), cz = Math.floor(p.z / cell);
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+          const bucket = sg.grid.get((cx + dx) + ',' + (cy + dy) + ',' + (cz + dz));
+          if (!bucket) continue;
+          for (const t of bucket) {
+            if (tree.has(t.name)) continue;
+            const ex = t.x - p.x, ey = t.y - p.y, ez = t.z - p.z;
+            if (ex * ex + ey * ey + ez * ez <= r2) { tree.set(t.name, { j: depth, prev: s }); next.push(t.name); }
+          }
+        }
+      }
+      frontier = next;
+    }
+    return tree;
+  }
+
+  function pathFromTree(tree, toName) {
+    const out = [];
+    let cur = toName;
+    while (cur) { out.push(cur); const n = tree.get(cur); cur = n ? n.prev : null; }
+    return out.reverse();
   }
 
   /* ---------------- route search ---------------- */
@@ -253,7 +517,9 @@
    * opts: startKey, credits, insurance, capacity, lyPer, jumpsPer, hops, noRevisit, loop,
    *       towardSystem, avoidSystems/avoidStations/avoidCommodities, minProfitPerUnit,
    *       beamWidth, branch, maxResults, noPlanetary, includeCarriers, maxAgeHours,
-   *       requirePad ('any'|'M'|'L'), maxStationLs
+   *       requirePad ('any'|'M'|'L'), maxStationLs,
+   *       objective ('profit' | 'rate'), pathMode ('line' | 'graph'), impact (0..1), split (bool),
+   *       secPerJump, secPerStop
    * returns { routes, warnings, stats }
    */
   function findRoutes(data, opts) {
@@ -261,11 +527,27 @@
     const startStored = data.stations[opts.startKey];
     if (!startStored) throw new Error('Unknown starting station (not in market data): ' + opts.startKey);
 
-    const lyPerEarly = Math.max(1, opts.lyPer || 20);
-    const reach = lyPerEarly * (opts.jumpsPer === 0 ? 0 : (opts.jumpsPer || 2)) * Math.max(1, Math.floor(opts.hops || 2));
+    const lyPer = Math.max(1, opts.lyPer || 20);
+    const jumpsPer = opts.jumpsPer === 0 ? 0 : Math.max(0, Math.floor(opts.jumpsPer || 2));
+    const hopRadius = lyPer * jumpsPer;
+    const capacity = Math.max(1, Math.floor(opts.capacity || 1));
+    const hops = Math.max(1, Math.floor(opts.hops || 2));
+    const beamWidth = Math.max(1, opts.beamWidth || 6);
+    const branch = Math.max(1, opts.branch || 12);
+    const maxResults = Math.max(1, opts.maxResults || 8);
+    const insurance = opts.insurance || 0;
+    const impact = Math.min(1, Math.max(0, opts.impact || 0));
+    const objective = opts.objective === 'rate' ? 'rate' : 'profit';
+    const graphMode = opts.pathMode === 'graph';
+    const split = !!opts.split;
+    const secJ = Number.isFinite(opts.secPerJump) ? Math.max(0, opts.secPerJump) : 50;
+    const secStop = Number.isFinite(opts.secPerStop) ? Math.max(0, opts.secPerStop) : 150;
+    const minP = opts.minProfitPerUnit;
+    const reach = hopRadius * hops;
     const centerPos = data.systems[startStored.system];
-    // Optional per-run context (opts._ctx) lets repeated passes reuse the filtered station set,
-    // neighbour lists and computed cargo loads instead of rebuilding them every time.
+
+    // Optional per-run context (opts._ctx): repeated passes reuse prepared station sets, neighbour lists,
+    // jump trees and computed cargo loads instead of rebuilding them.
     const ctx = opts._ctx || null;
     const prepKey = 'age' + (opts.maxAgeHours || 0);
     let prep = ctx && ctx.preps.get(prepKey);
@@ -276,19 +558,9 @@
       prep.candCache = new Map();
       if (ctx) ctx.preps.set(prepKey, prep);
     }
-    const { stations, neighboursWithin, blocked, byKey } = prep;
+    const { stations, neighboursWithin, blocked, byKey, bySystem } = prep;
     const start = byKey.get(opts.startKey);
     if (!start) throw new Error('Starting station has no known system coordinates: ' + opts.startKey);
-    const capacityForMemo = Math.max(1, Math.floor(opts.capacity || 1));
-
-    const lyPer = Math.max(1, opts.lyPer || 20);
-    const hopRadius = Math.max(0, lyPer * (opts.jumpsPer === 0 ? 0 : (opts.jumpsPer || 2)));
-    const capacity = Math.max(1, Math.floor(opts.capacity || 1));
-    const hops = Math.max(1, Math.floor(opts.hops || 2));
-    const beamWidth = Math.max(1, opts.beamWidth || 6);
-    const branch = Math.max(1, opts.branch || 12);
-    const maxResults = Math.max(1, opts.maxResults || 8);
-    const insurance = opts.insurance || 0;
 
     if (insurance >= opts.credits) warnings.push('Insurance reserve is at least your credits, so nothing can be spent on cargo.');
     if (opts.maxAgeHours > 0 && !data.hasAges) warnings.push('This dataset has no price timestamps, so the data-age filter was ignored.');
@@ -300,48 +572,94 @@
       else if (opts.loop) { warnings.push('"Head toward" is ignored when looping back to the start.'); towardPos = null; }
     }
 
-    const neighbourCache = prep.neighbourCache;
-
-    /**
-     * Value of the best load from -> to (an object with .total), memoised across every pass of one run.
-     * Only the profit is computed here; the actual cargo list (picks) is built later, and only for the
-     * few routes that survive, via bestLoad().
-     */
-    function loadFor(from, to, spendable) {
-      let row = null;
-      if (ctx) {
-        row = ctx.memo.get(from.key);
-        if (!row) { row = new Map(); ctx.memo.set(from.key, row); }
-        const hit = row.get(to.key);
-        if (hit && (hit.free ? spendable >= hit.cost : spendable === hit.credits)) return hit;
+    /* ----- jump graph ----- */
+    let sysGrid = ctx ? ctx.sysGrid : null;
+    const trees = ctx ? ctx.trees : new Map();
+    function treeOf(sysName) {
+      let t = trees.get(sysName);
+      if (!t) {
+        if (!sysGrid) { sysGrid = buildSysGrid(data, centerPos, reach + hopRadius + lyPer, lyPer); if (ctx) ctx.sysGrid = sysGrid; }
+        t = bfsTree(sysGrid, data, sysName, lyPer, jumpsPer);
+        if (trees.size >= 400) trees.clear();
+        trees.set(sysName, t);
       }
-      let entry;
-      const t = quickLoad(from, to, spendable, capacityForMemo, blocked, opts.minProfitPerUnit);
-      if (t >= 0) {
-        entry = { free: true, credits: spendable, cost: qCost, total: t };
-      } else {
-        const r = bestLoad(from, to, spendable, capacityForMemo, blocked, opts.minProfitPerUnit);
-        entry = { free: r.free, credits: spendable, cost: r.cost, total: r.total };
-      }
-      if (row) {
-        row.set(to.key, entry);
-        if (++ctx.memoSize > 400000) { ctx.memo.clear(); ctx.memoSize = 0; }
-      }
-      return entry;
+      return t;
+    }
+    /** Jumps between two systems within the per-hop limit, or null if not reachable. */
+    function jumpsBetween(a, b) {
+      if (a === b) return 0;
+      if (graphMode) { const n = treeOf(a).get(b); return n ? n.j : null; }
+      const d = dist3(data.systems[a], data.systems[b]);
+      return d <= hopRadius + EPS ? Math.ceil(d / lyPer - EPS) : null;
     }
 
+    const neighbourCache = prep.neighbourCache;
     function neighboursOf(st) {
       let n = neighbourCache.get(st.key);
       if (!n) {
-        n = neighboursWithin(st.pos, hopRadius).filter((x) => x.station.key !== st.key);
+        n = [];
+        if (graphMode) {
+          for (const [sysName, info] of treeOf(st.system)) {
+            const list = bySystem.get(sysName);
+            if (!list) continue;
+            for (const s of list) if (s.key !== st.key) n.push({ station: s, dist: dist3(st.pos, s.pos), jumps: info.j });
+          }
+        } else {
+          for (const x of neighboursWithin(st.pos, hopRadius)) {
+            if (x.station.key === st.key) continue;
+            n.push({ station: x.station, dist: x.dist, jumps: x.dist > 0 ? Math.ceil(x.dist / lyPer - EPS) : 0 });
+          }
+        }
         neighbourCache.set(st.key, n);
       }
       return n;
     }
 
+    /* ----- leg values (memoised across passes) ----- */
+    function cached(memoMap, from, to, spendable, compute) {
+      let row = null;
+      if (ctx) {
+        row = memoMap.get(from.key);
+        if (!row) { row = new Map(); memoMap.set(from.key, row); }
+        const hit = row.get(to.key);
+        if (hit && (hit.free ? spendable >= hit.cost : spendable === hit.credits)) return hit;
+      }
+      const entry = compute(from, to, spendable);
+      if (row) {
+        row.set(to.key, entry);
+        if (++ctx.memoSize > 400000) { ctx.memo.clear(); ctx.memoI.clear(); ctx.memoSize = 0; }
+      }
+      return entry;
+    }
+    const compute0 = (from, to, sp) => {
+      const t = quickLoad(from, to, sp, capacity, blocked, minP);
+      if (t >= 0) return { free: true, credits: sp, cost: qCost, total: t };
+      const r = bestLoad(from, to, sp, capacity, blocked, minP);
+      return { free: r.free, credits: sp, cost: r.cost, total: r.total };
+    };
+    const computeI = (from, to, sp) => {
+      const t = impactLoad(from, to, sp, capacity, blocked, minP, impact, false);
+      return { free: iFree, credits: sp, cost: iCost, total: t };
+    };
+    const ctxMemo = ctx ? ctx.memo : null, ctxMemoI = ctx ? ctx.memoI : null;
+    const value0 = (from, to, sp) => cached(ctxMemo, from, to, sp, compute0);
+    const valueI = (from, to, sp) => cached(ctxMemoI, from, to, sp, computeI);
+    const loadFor = (from, to, sp) => (impact > 0 ? valueI(from, to, sp) : value0(from, to, sp));
+
+    /** Cargo rows for a chosen single leg. */
+    function picksFor(from, to, spendable) {
+      if (impact > 0) return impactLoad(from, to, spendable, capacity, blocked, minP, impact, true).picks;
+      return bestLoad(from, to, spendable, capacity, blocked, minP).picks;
+    }
+
+    const legSeconds = (jumps, destLs) => secStop + jumps * secJ + scTime(destLs);
+    const legScore = (profit, time) => (objective === 'rate' ? profit / Math.max(time, 1) : profit);
+    const partialScore = (p) => (objective === 'rate' ? p.totalProfit / Math.max(p.totalTime, 1) : p.totalProfit);
+
+    /* ----- search ----- */
     let beam = [{
       path: [{ station: start, picks: null, profit: 0, jumpDist: 0 }],
-      credits: opts.credits, visited: new Set([start.key]), totalProfit: 0, totalDist: 0,
+      credits: opts.credits, visited: new Set([start.key]), totalProfit: 0, totalDist: 0, totalTime: 0,
     }];
 
     for (let hop = 0; hop < hops; hop++) {
@@ -355,36 +673,86 @@
 
         if (isLastHop && opts.loop) {
           if (here.key === start.key) { nextBeam.push(partial); continue; }
+          const j = jumpsBetween(here.system, start.system);
+          if (j === null) continue;
           const d = dist3(here.pos, start.pos);
-          if (d > hopRadius + EPS) continue;
           // The return leg is mandatory; an empty run home is acceptable if nothing profitable exists.
           const r = loadFor(here, start, spendable);
-          cands.push({ dest: start, dist: d, picks: null, profit: r.total });
+          cands.push({ dest: start, dist: d, jumps: j, picks: null, profit: r.total, time: legSeconds(j, start.distLs) });
         } else {
           const remainingAfter = hops - 1 - hop;
-          const visitedOk = (c) => !(opts.noRevisit && partial.visited.has(c.dest.key));
+          const visitedOk = (c) => !(opts.noRevisit && (partial.visited.has(c.dest.key) || (c.via && partial.visited.has(c.via.key))));
 
-          /** Every profitable destination from `here`, best first. Independent of the path taken (except visited). */
+          /** Every profitable destination from `here`, best first (independent of the path taken, except visited). */
           const build = (keep) => {
-            const all = [];
             const hereToTarget = towardPos ? dist3(here.pos, towardPos) : 0;
-            for (const { station: dest, dist } of neighboursOf(here)) {
+            const base = [];
+            for (const nb of neighboursOf(here)) {
+              const dest = nb.station;
               if (opts.loop && dist3(dest.pos, start.pos) > hopRadius * remainingAfter + EPS) continue;
               if (towardPos) {
                 const dt = dist3(dest.pos, towardPos);
                 if (!(dt < hereToTarget - 0.01 || dt <= lyPer)) continue;
               }
-              const r = loadFor(here, dest, spendable);
+              const r = value0(here, dest, spendable); // upper bound: price impact can only lower profit
               if (r.total <= 0) continue;
-              all.push({ dest, dist, picks: null, profit: r.total });
+              base.push({ dest, dist: nb.dist, jumps: nb.jumps, ub: r.total, profit: r.total, time: legSeconds(nb.jumps, dest.distLs), picks: null });
             }
-            all.sort((a, b) => b.profit - a.profit || a.dist - b.dist);
-            return { list: keep && all.length > keep ? all.slice(0, keep) : all, truncated: !!keep && all.length > keep };
+            const byScore = (a, b) => legScore(b.profit, b.time) - legScore(a.profit, a.time) || a.dist - b.dist;
+            let out;
+            if (impact > 0) {
+              // Branch and bound: evaluate with impact in order of the no-impact upper bound and stop once
+              // no remaining destination can beat the current top `keep`.
+              base.sort((a, b) => legScore(b.ub, b.time) - legScore(a.ub, a.time) || a.dist - b.dist);
+              out = [];
+              const need = keep || Infinity;
+              for (const c of base) {
+                if (out.length >= need && legScore(c.ub, c.time) <= legScore(out[need - 1].profit, out[need - 1].time)) break;
+                const r = valueI(here, c.dest, spendable);
+                if (r.total <= 0) continue;
+                c.profit = r.total;
+                const sc = legScore(c.profit, c.time);
+                let lo = 0, hi = out.length;
+                while (lo < hi) { const mid = (lo + hi) >> 1; if (legScore(out[mid].profit, out[mid].time) >= sc) lo = mid + 1; else hi = mid; }
+                out.splice(lo, 0, c);
+                if (out.length > need) out.length = need;
+              }
+            } else {
+              out = base.sort(byScore);
+            }
+            const truncated = !!keep && (impact > 0 ? base.length > keep : out.length > keep);
+
+            // Optional: split the hold between two nearby selling stops.
+            if (split && out.length > 1) {
+              const top = out.slice(0, Math.min(10, out.length));
+              const extra = [];
+              for (let a = 0; a < top.length; a++) for (let b = a + 1; b < top.length; b++) {
+                const B = top[a], C = top[b];
+                const jbc = jumpsBetween(B.dest.system, C.dest.system);
+                if (jbc === null) continue;
+                const sp = splitLoad(here, B.dest, C.dest, spendable, capacity, blocked, minP, impact);
+                if (sp.total <= Math.max(B.profit, C.profit) * 1.001) continue; // not better than one stop
+                const d2 = dist3(B.dest.pos, C.dest.pos);
+                for (const [first, second, firstIsB] of [[B, C, true], [C, B, false]]) {
+                  const j2 = jbc;
+                  extra.push({
+                    dest: second.dest, via: first.dest, dist: first.dist + d2, jumps: first.jumps + j2,
+                    parts: [{ dist: first.dist, jumps: first.jumps }, { dist: d2, jumps: j2 }],
+                    profit: sp.total, picks: sp.picks, firstIsB,
+                    time: legSeconds(first.jumps, first.dest.distLs) + legSeconds(j2, second.dest.distLs),
+                  });
+                }
+              }
+              if (extra.length) {
+                out = out.concat(extra).sort(byScore);
+              }
+            }
+            return { list: keep && out.length > keep ? out.slice(0, keep) : out, truncated };
           };
 
-          let entry = null, ckey = null;
+          let entry;
           if (ctx) {
-            ckey = here.key + '|' + spendable + '|' + (opts.loop ? remainingAfter : '');
+            const ckey = objective + '|' + here.key + '|' + spendable + '|' + (opts.loop ? remainingAfter : '');
             entry = prep.candCache.get(ckey);
             if (!entry) {
               entry = build(CAND_KEEP);
@@ -400,22 +768,24 @@
         }
 
         for (const c of cands) {
-          if (!c.picks) c.picks = bestLoad(here, c.dest, spendable, capacity, blocked, opts.minProfitPerUnit).picks;
+          if (!c.picks) c.picks = picksFor(here, c.dest, spendable);
           const visited = new Set(partial.visited);
           visited.add(c.dest.key);
+          if (c.via) visited.add(c.via.key);
           nextBeam.push({
-            path: partial.path.concat([{ station: c.dest, picks: c.picks, profit: c.profit, jumpDist: c.dist }]),
+            path: partial.path.concat([{ station: c.dest, via: c.via || null, parts: c.parts || null, firstIsB: c.firstIsB, picks: c.picks, profit: c.profit, jumpDist: c.dist, jumps: c.jumps }]),
             credits: partial.credits + c.profit,
             visited,
             totalProfit: partial.totalProfit + c.profit,
             totalDist: partial.totalDist + c.dist,
+            totalTime: partial.totalTime + c.time,
           });
         }
       }
 
       if (nextBeam.length === 0) break; // dead end everywhere: keep the last beam
-      // Highest total credits first. Distance only breaks exact ties.
-      nextBeam.sort((a, b) => b.totalProfit - a.totalProfit || a.totalDist - b.totalDist);
+      // Best first (total credits, or credits per hour). Distance only breaks exact ties.
+      nextBeam.sort((a, b) => partialScore(b) - partialScore(a) || a.totalDist - b.totalDist);
       const keep = isLastHop ? Math.max(beamWidth, maxResults) : beamWidth;
       const perEnd = new Map();
       const picked = [];
@@ -430,22 +800,40 @@
       beam = picked;
     }
 
+    const segPath = (a, b) => (graphMode ? pathFromTree(treeOf(a), b) : null);
+
     const routes = beam
       .filter((r) => r.path.length > 1)
-      .sort((a, b) => b.totalProfit - a.totalProfit || a.totalDist - b.totalDist)
+      .sort((a, b) => partialScore(b) - partialScore(a) || a.totalDist - b.totalDist)
       .slice(0, maxResults)
       .map((r) => ({
         totalProfit: r.totalProfit,
         endCredits: r.credits,
         totalDist: r.totalDist,
-        hops: r.path.slice(1).map((leg, i) => ({
-          from: slim(r.path[i].station),
-          to: slim(leg.station),
-          distLy: leg.jumpDist,
-          jumps: leg.jumpDist > 0 ? Math.ceil(leg.jumpDist / lyPer - EPS) : 0,
-          load: describeLoad(leg.picks, data.commodities),
-          profit: leg.profit,
-        })),
+        totalTime: r.totalTime,
+        profitPerHour: r.totalTime > 0 ? (r.totalProfit / r.totalTime) * 3600 : 0,
+        hops: r.path.slice(1).map((leg, i) => {
+          const from = r.path[i].station;
+          const stops = leg.via ? [leg.via, leg.station] : [leg.station];
+          const segments = [];
+          let prevSys = from.system;
+          stops.forEach((st, si) => {
+            const part = leg.parts ? leg.parts[si] : { dist: leg.jumpDist, jumps: leg.jumps };
+            segments.push({ to: slim(st), distLy: part.dist, jumps: part.jumps, path: segPath(prevSys, st.system) });
+            prevSys = st.system;
+          });
+          const atOf = leg.via ? (p) => (leg.firstIsB ? p.st : 1 - p.st) : null;
+          return {
+            from: slim(from),
+            to: slim(leg.station),
+            distLy: leg.jumpDist,
+            jumps: leg.jumps,
+            segments,
+            load: describeLoad(leg.picks, data.commodities, atOf),
+            profit: leg.profit,
+            timeSec: legSeconds(leg.jumps, leg.station.distLs),
+          };
+        }),
       }));
 
     if (!routes.length) {
@@ -462,10 +850,15 @@
     const avoid = new Set(upperList(opts.avoidCommodities));
     const blocked = new Uint8Array(data.commodities.length);
     data.commodities.forEach((n, i) => { if (isBlockedCommodity(n) || avoid.has(n.toUpperCase())) blocked[i] = 1; });
-    const fwd = bestLoad(from, to, credits, capacity, blocked, opts.minProfitPerUnit);
+    const k = Math.min(1, Math.max(0, opts.impact || 0));
+    const one = (a, b) => {
+      if (k > 0) return impactLoad(a, b, credits, capacity, blocked, opts.minProfitPerUnit, k, true);
+      return bestLoad(a, b, credits, capacity, blocked, opts.minProfitPerUnit);
+    };
+    const fwd = one(from, to);
     const result = { load: describeLoad(fwd.picks, data.commodities), totalProfit: fwd.total, cost: fwd.cost };
     if (!result.load.length) {
-      const rev = bestLoad(to, from, credits, capacity, blocked, opts.minProfitPerUnit);
+      const rev = one(to, from);
       if (rev.total > 0) result.reverseProfit = rev.total;
     }
     return result;
@@ -476,7 +869,9 @@
     return ly * (opts.jumpsPer === 0 ? 0 : (opts.jumpsPer || 2)) * Math.max(1, Math.floor(opts.hops || 2));
   }
 
-  function createContext() { return { preps: new Map(), memo: new Map(), memoSize: 0 }; }
+  function createContext() {
+    return { preps: new Map(), memo: new Map(), memoI: new Map(), memoSize: 0, trees: new Map(), sysGrid: null };
+  }
 
   /** Number of stations a search with these limits could use (cheap; used to skip duplicate windows). */
   function countStations(data, opts) {
@@ -486,7 +881,7 @@
     return prep.stations.length;
   }
 
-  const api = { createContext, countStations, reachRadius, findRoutes, bestSingleTrade, bestLoad, dist3, isBlockedCommodity };
+  const api = { createContext, countStations, reachRadius, findRoutes, bestSingleTrade, bestLoad, impactLoad, splitLoad, dist3, isBlockedCommodity };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.TDOptimizer = api;
 })(typeof self !== 'undefined' ? self : this);

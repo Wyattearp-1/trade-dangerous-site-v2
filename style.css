@@ -531,3 +531,10 @@ button.secondary.small { padding: 4px 12px; font-size: 0.8rem; border-radius: 7p
   .route-overview { padding: 10px 12px; }
   .step { padding: 8px 10px; }
 }
+
+.listed { display: block; font-size: 0.7rem; color: var(--ink-dim); font-family: var(--mono); }
+.jump-path { margin-top: 4px; font-size: 0.8rem; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 0; }
+.jump-path .stop { font-weight: 500; color: var(--ink); }
+.pill .part { font-weight: 400; letter-spacing: 0; opacity: 0.85; }
+.leg-total { margin: 6px 0 0 3px; padding-left: 12px; }
+.route-meta b { color: var(--amber); font-weight: 600; }

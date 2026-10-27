@@ -17,7 +17,7 @@ const COMMS = ['ALPHA', 'BETA', 'GAMMA', 'DELTA'];
 function makeData(systems, stations) {
   const meta = { version: 2, commodities: COMMS, systems, generated_at: '2026-01-01T00:00:00Z' };
   const st = {};
-  for (const s of stations) st[s.key] = [s.pad || 'L', 0, s.flags || 0, s.updated || 0, [].concat(...s.rows)];
+  for (const s of stations) st[s.key] = [s.pad || 'L', s.ls || 0, s.flags || 0, s.updated || 0, [].concat(...s.rows)];
   return buildDataset(meta, [{ stations: st }]);
 }
 const base = {
@@ -160,6 +160,70 @@ test('quick trade reports the reverse direction when A->B loses money', () => {
   const r = bestSingleTrade(d, 'X/ONE', 'Y/TWO', 1e5, 10);
   assert.strictEqual(r.load.length, 0);
   assert.ok(r.reverseProfit > 0);
+});
+
+
+test('price impact lowers profit on a big load, and k = 0 matches listed prices', () => {
+  const d = makeData({ X: [0, 0, 0], Y: [1, 0, 0] }, [
+    { key: 'X/ONE', system: 'X', rows: [[0, 100, 0, 100, 0]] },
+    { key: 'Y/TWO', system: 'Y', rows: [[0, 0, 200, 0, 100]] },
+  ]);
+  const o = Object.assign({}, base, { startKey: 'X/ONE', capacity: 100, credits: 1e6 });
+  assert.strictEqual(findRoutes(d, o).routes[0].totalProfit, 10000);
+  // k=0.5: marginal profit = 100 - 1.5 x, so the best load stops at ~67 units (profit ~3,333), not all 100 (2,500).
+  const imp = findRoutes(d, Object.assign({}, o, { impact: 0.5 })).routes[0];
+  assert.ok(imp.totalProfit >= 3300 && imp.totalProfit <= 3334, 'got ' + imp.totalProfit);
+  assert.ok(imp.hops[0].load[0].units >= 64 && imp.hops[0].load[0].units <= 70, 'stops buying once the margin is gone');
+  assert.ok(imp.hops[0].load[0].buyAvg > imp.hops[0].load[0].buy, 'average buy price is above the listed price');
+  assert.ok(imp.hops[0].load[0].sellAvg < imp.hops[0].load[0].sell, 'average sell price is below the listed price');
+  // small loads barely move the price
+  const small = findRoutes(d, Object.assign({}, o, { capacity: 2, impact: 0.5 })).routes[0].totalProfit;
+  assert.ok(small >= 190 && small <= 200, 'got ' + small);
+});
+
+test('real jump paths: a gap with no intermediate system is not reachable, a stepping stone is', () => {
+  const stations = [
+    { key: 'S/HOME', system: 'S', rows: [[0, 100, 0, 1e6, 0]] },
+    { key: 'T/FAR', system: 'T', rows: [[0, 0, 400, 0, 1e6]] },
+  ];
+  const o = Object.assign({}, base, { startKey: 'S/HOME', lyPer: 20, jumpsPer: 2 });
+  const gap = makeData({ S: [0, 0, 0], T: [30, 0, 0] }, stations);
+  assert.strictEqual(findRoutes(gap, Object.assign({}, o, { pathMode: 'line' })).routes.length, 1, 'straight-line says reachable');
+  assert.strictEqual(findRoutes(gap, Object.assign({}, o, { pathMode: 'graph' })).routes.length, 0, 'no star within 20 ly of both ends');
+  const bridged = makeData({ S: [0, 0, 0], M: [15, 0, 0], T: [30, 0, 0] }, stations);
+  const r = findRoutes(bridged, Object.assign({}, o, { pathMode: 'graph' })).routes[0];
+  assert.deepStrictEqual(r.hops[0].segments[0].path, ['S', 'M', 'T']);
+  assert.strictEqual(r.hops[0].jumps, 2);
+});
+
+test('credits-per-hour objective prefers a quick trade over a bigger but slower one', () => {
+  const d = makeData({ S: [0, 0, 0], N: [1, 0, 0], F: [2, 0, 0] }, [
+    { key: 'S/HOME', system: 'S', rows: [[0, 100, 0, 1e6, 0]] },
+    { key: 'N/NEAR', system: 'N', ls: 100, rows: [[0, 0, 400, 0, 1e6]] },       // +3000
+    { key: 'F/FAR', system: 'F', ls: 400000, rows: [[0, 0, 600, 0, 1e6]] },     // +5000, ~14 min supercruise
+  ]);
+  const o = Object.assign({}, base, { startKey: 'S/HOME', jumpsPer: 2 });
+  assert.strictEqual(findRoutes(d, o).routes[0].hops[0].to.key, 'F/FAR');
+  const r = findRoutes(d, Object.assign({}, o, { objective: 'rate' })).routes[0];
+  assert.strictEqual(r.hops[0].to.key, 'N/NEAR');
+  assert.ok(r.totalTime > 0 && r.profitPerHour > 0);
+});
+
+test('split cargo across two stops beats the best single stop when demand is small', () => {
+  const d = makeData({ S: [0, 0, 0], X: [3, 0, 0], Y: [6, 0, 0] }, [
+    { key: 'S/HOME', system: 'S', rows: [[0, 100, 0, 1e6, 0]] },
+    { key: 'X/HIGH', system: 'X', rows: [[0, 0, 300, 0, 4]] },      // pays 300 but only wants 4
+    { key: 'Y/LOW', system: 'Y', rows: [[0, 0, 200, 0, 100]] },     // pays 200, wants plenty
+  ]);
+  const o = Object.assign({}, base, { startKey: 'S/HOME', capacity: 10, jumpsPer: 2, credits: 1e6 });
+  assert.strictEqual(findRoutes(d, o).routes[0].totalProfit, 1000);
+  const r = findRoutes(d, Object.assign({}, o, { split: true })).routes[0];
+  assert.strictEqual(r.totalProfit, 1400); // 4 x 200 at X + 6 x 100 at Y
+  assert.strictEqual(r.hops[0].segments.length, 2);
+  const at0 = r.hops[0].load.filter((l) => l.at === 0).reduce((n, l) => n + l.units, 0);
+  const at1 = r.hops[0].load.filter((l) => l.at === 1).reduce((n, l) => n + l.units, 0);
+  assert.strictEqual(at0 + at1, 10);
+  assert.ok(at0 === 4 || at1 === 4, 'the 4 high-paying units are sold at the HIGH station');
 });
 
 async function asyncTests() {

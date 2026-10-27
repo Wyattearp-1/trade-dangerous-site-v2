@@ -82,28 +82,37 @@
         const pool = new Map();
         const addRoutes = (routes) => {
           for (const r of routes) {
-            const sig = r.hops.map((h) => h.to.key).join('>');
+            const sig = r.hops.map((h) => (h.segments || [{ to: h.to }]).map((x) => x.to.key).join('+')).join('>');
             const have = pool.get(sig);
             if (!have || r.totalProfit > have.totalProfit) pool.set(sig, r);
           }
         };
         const say = (extra) => { if (onProgress) onProgress(Object.assign({ phase: 'search', elapsed: Date.now() - t1 }, extra)); };
 
+        // In credits-per-hour mode a beam ranked by rate can discard routes that turn out best, so we also run
+        // the max-credits ranking and pool both: the answer can never be slower than the max-profit route.
+        const objectives = opts.objective === 'rate' ? ['rate', 'profit'] : ['profit'];
+
         let passes = 0, first = null, lastWidth = widths[0], capped = false;
         outer:
         for (const w of widths) {
           for (const hrs of windows) {
-            if (passes > 0 && Date.now() - t1 > cap) { capped = true; break outer; }
-            passes++;
-            say({ pass: passes, width: w, note: hrs === chosen ? 'width ' + w : 'width ' + w + ', prices ≤ ' + hrs + 'h' });
-            const r = root.TDOptimizer.findRoutes(DATA, Object.assign({}, runOpts, { maxAgeHours: hrs, beamWidth: w, branch: Math.max(12, w * 2), maxResults: want }));
-            if (hrs === chosen && !first) first = r;
-            addRoutes(r.routes);
+            for (const obj of objectives) {
+              if (passes > 0 && Date.now() - t1 > cap) { capped = true; break outer; }
+              passes++;
+              say({ pass: passes, width: w, note: (hrs === chosen ? 'width ' + w : 'width ' + w + ', prices ≤ ' + hrs + 'h') + (objectives.length > 1 ? ', ' + obj : '') });
+              const r = root.TDOptimizer.findRoutes(DATA, Object.assign({}, runOpts, { objective: obj, maxAgeHours: hrs, beamWidth: w, branch: Math.max(12, w * 2), maxResults: want }));
+              if (hrs === chosen && !first) first = r;
+              addRoutes(r.routes);
+            }
           }
           lastWidth = w;
         }
 
-        let routes = Array.from(pool.values()).sort((a, b) => b.totalProfit - a.totalProfit || a.totalDist - b.totalDist).slice(0, want);
+        const rateMode = opts.objective === 'rate';
+        let routes = Array.from(pool.values())
+          .sort((a, b) => (rateMode ? b.profitPerHour - a.profitPerHour : b.totalProfit - a.totalProfit) || a.totalDist - b.totalDist)
+          .slice(0, want);
         if (opts.minRouteProfit > 0) routes = routes.filter((r) => r.totalProfit >= opts.minRouteProfit);
         return {
           routes,

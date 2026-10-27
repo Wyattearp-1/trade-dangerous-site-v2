@@ -28,23 +28,43 @@ sample dataset.
 
 ## What the planner does
 
-* **Objective: maximum total credits.** Every hop is scored by the actual cargo profit it makes, and the search
-  keeps the richest partial routes. Distance is a reach limit only; it is displayed but never traded off against
-  profit. (Optional sorts such as "shortest distance" only reorder the finished results.)
+* **Two ways to search ("Optimize for"):**
+  * **Maximum total credits** (default): every hop is scored by the cargo profit it makes and the search keeps the
+    richest partial routes. Distance is a reach limit only; it is displayed but never traded off against profit.
+  * **Credits per hour:** profit divided by an estimated trip time. Time per leg = seconds per jump x jumps +
+    supercruise to the station (estimated from its distance from the star: 25 s + 1.25 x sqrt(Ls)) + seconds per
+    station stop (docking, trading, launching). Both per-jump and per-stop times are adjustable. These are estimates,
+    not measurements. Rate mode also runs the max-credits search and pools the two, so it can never come back
+    slower (per hour) than the max-credits route.
+* **Price movement (Light / Medium / Heavy / Off):** buying raises a station's price and selling lowers it as you use up
+  its stock or demand. The average price over x units is `p * (1 + k*x/(2*stock))` when buying and
+  `s * (1 - k*x/(2*demand))` when selling, with k = 0.15 / 0.3 / 0.6. Elite does not publish its real formula, so
+  this is an estimate; it matters most for big holds, where it stops the planner from assuming you can buy 700 t at the
+  listed price. The planner also stops buying once the extra units no longer make money. Results show the average price
+  you would actually pay/get, with the listed price underneath.
+* **Real jump paths:** a hop only counts if you can really get there, one jump at a time (each jump no longer than
+  your jump range, at most "max jumps between hops" jumps). Each leg shows the systems to jump through and the true
+  jump count. Only systems in the data are used as waypoints (every system that has a station market), so a path can
+  be longer than the real best one, and a destination reachable only through empty, unlisted stars can be missed. Switch
+  to **Straight line** for the old, faster, optimistic behaviour.
+* **Split cargo across two stops (optional):** sell part of the hold at one station and the rest at a second nearby
+  one when that earns more (for example when the best buyer only wants a few tons). Considers pairs among the best
+  destinations; the two stops must be within your jump limit of each other.
 * Start station, credits, insurance reserve, cargo capacity, jump range, jumps per hop, number of hops, optional
   loop back to start, optional "head toward" system, avoid-lists (systems / stations / commodities), minimum profit,
   pad size, max distance from star, **max price age**, fleet carriers (off by default) and Odyssey/planetary toggles.
 * **Cargo loads respect both cargo space and credits.** When credits are tight, loads are re-ranked by return on
   credit so an expensive high-margin good doesn't crowd out a cheaper, better-value one.
 * Supply and demand cap the units; a price with no stock/demand behind it is never traded.
-* Results show stock and demand at each end, pad size, distance from star, and how old each station's prices are.
+* Results read as steps (BUY here, fly, SELL there) with stock, pad size, distance from star, price age, trip time and
+  credits per hour.
 * Copy a route as text, or copy a link that restores all your settings. Settings are also remembered per browser.
 * The search runs in a Web Worker, so the page stays responsive (it falls back to the main thread if workers are
   unavailable).
 
 ### Known limits
 
-* Reach per hop is `jump range × max jumps`, measured **in a straight line**; real multi-jump pathing isn't computed.
+* In **Straight line** mode, reach per hop is `jump range × max jumps` measured in a straight line. In **Real jump paths** mode it is a true jump path through known systems (see above).
 * It is a beam search, so it is a very good heuristic but not a proof of optimality. To make it dependable, each run uses a fixed schedule of beam widths (set by **Search effort**) and runs it over **every price-age window up to the one you chose** (1h, 6h, 24h, 3 days, 7 days, any), pooling the results. A looser setting therefore runs every pass a stricter one runs, so loosening a limit (e.g. 3 days → 7 days → any) can never return a worse best route. The schedule is fixed rather than time-based on purpose, so results are repeatable. Shared caches make the repeated passes cheap.
 * "Head toward" requires each hop to end closer to the target system (or within one jump range of it); it is ignored in loop mode.
 * Prices are a snapshot. Always verify against live prices (every station links to Inara) before you buy.
