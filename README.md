@@ -70,6 +70,27 @@ sample dataset.
 * "Head toward" requires each hop to end closer to the target system (or within one jump range of it); it is ignored in loop mode.
 * Prices are a snapshot. Always verify against live prices (every station links to Inara) before you buy.
 
+## Live prices
+
+The nightly snapshot can be hours old, so after every search the page automatically checks **current** prices:
+
+1. It takes the routes it is about to show (plus a few extra candidates) and asks public community services for the
+   live market of each station on them: [EDSM](https://www.edsm.net/) first, then [Ardent](https://ardent-insight.com/)
+   as a fallback. Both are fed by players' game uploads through EDDN, so their data is usually minutes old.
+2. Each route is **re-planned** with the live prices (cargo is re-optimised, not just re-priced), and the list is
+   re-ranked, so a route that only looked good on stale prices drops out. Routes show a badge such as
+   `LIVE 4/5 · -12% vs snapshot`, and stations show a LIVE tag with the age of their prices.
+3. It re-checks every 5 minutes while results stay on screen, and when you return to the tab. Lookups are cached for 3
+   minutes and made a few at a time to be polite to the services.
+4. If a service is down, rate-limits, or blocks browser requests (CORS), the page keeps using the snapshot and says so.
+   The About tab has a **Test live price connection** button that shows which service works from your browser.
+
+Limits: this is as live as a website can be without a server listening to the game's data feed (EDDN is not reachable
+from a browser). Only stations on the routes being shown are checked; the search itself still runs on the snapshot.
+The live services' response formats were written from their public documentation and are parsed defensively, but have
+not been verified against the live APIs from this project's build environment, so use the test button after deploying.
+Station names are matched by name (the snapshot does not store market IDs).
+
 ## Data: every station is searchable
 
 The builder (`build_data.py`) streams the [Spansh](https://spansh.co.uk/dumps) `galaxy_stations` dump and keeps
@@ -148,6 +169,7 @@ Open the site over `http://` (not `file://`): browsers block `fetch` and Web Wor
 |---|---|
 | `index.html`, `style.css`, `app.js` | UI |
 | `data.js` | dataset download (index + on-demand tiles) and normalisation |
+| `live.js` | live market lookups (EDSM / Ardent) for the automatic price check |
 | `optimizer.js` | route search and cargo loading |
 | `engine.js`, `worker.js` | runs the above off the UI thread |
 | `build_data.py` | builds the dataset from Spansh |

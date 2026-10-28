@@ -451,7 +451,7 @@
   }
 
   function slim(s) {
-    return { key: s.key, name: s.name, system: s.system, pad: s.pad, distLs: s.distLs, planetary: s.planetary, carrier: s.carrier, updated: s.updated };
+    return { key: s.key, name: s.name, system: s.system, pad: s.pad, distLs: s.distLs, planetary: s.planetary, carrier: s.carrier, updated: s.updated, live: !!s.live };
   }
 
   /* ---------------- time model (estimates, all adjustable) ---------------- */
@@ -864,6 +864,103 @@
     return result;
   }
 
+
+  /* ---------------- live re-pricing ---------------- */
+
+  function normName(n) { return String(n || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+
+  /** A copy of a snapshot station whose market is replaced by live rows [[name, buy, sell, supply, demand], ...]. */
+  function liveStationFrom(data, snap, live) {
+    if (!data._commIndex) {
+      data._commIndex = new Map();
+      data.commodities.forEach((n, i) => data._commIndex.set(normName(n), i));
+    }
+    const list = [];
+    for (const r of live.rows || []) {
+      const id = data._commIndex.get(normName(r[0]));
+      if (id === undefined) continue;
+      let buy = r[1] | 0, sell = r[2] | 0;
+      const sup = Math.min(Number(r[3]) || 0, 2147483647) | 0, dem = Math.min(Number(r[4]) || 0, 2147483647) | 0;
+      if (buy > 0 && sup <= 0) buy = 0;
+      if (sell > 0 && dem <= 0) sell = 0;
+      if (buy <= 0 && sell <= 0) continue;
+      list.push([id, buy, sell, sup, dem]);
+    }
+    list.sort((a, b) => a[0] - b[0]);
+    const n = list.length;
+    const ids = new Uint16Array(n), buy = new Int32Array(n), sell = new Int32Array(n), supply = new Int32Array(n), demand = new Int32Array(n);
+    list.forEach((r, i) => { ids[i] = r[0]; buy[i] = r[1]; sell[i] = r[2]; supply[i] = r[3]; demand[i] = r[4]; });
+    return Object.assign({}, snap, { ids, buy, sell, supply, demand, updated: live.updated || 0, live: true });
+  }
+
+  /**
+   * Re-plan every leg of a route using live markets where we have them (snapshot otherwise).
+   * liveMap: { stationKey: { rows, updated } }.  Loads are re-optimised, so the route shows what you
+   * would actually do right now, not just the old plan with new prices.
+   */
+  function repriceRoute(data, route, liveMap, opts) {
+    opts = opts || {};
+    const impact = Math.min(1, Math.max(0, opts.impact || 0));
+    const capacity = Math.max(1, Math.floor(opts.capacity || 1));
+    const minP = opts.minProfitPerUnit;
+    const insurance = opts.insurance || 0;
+    const avoid = new Set(upperList(opts.avoidCommodities));
+    const blocked = new Uint8Array(data.commodities.length);
+    data.commodities.forEach((n, i) => { if (isBlockedCommodity(n) || avoid.has(n.toUpperCase())) blocked[i] = 1; });
+
+    const cache = new Map();
+    let liveCount = 0, total = 0;
+    const stationFor = (key) => {
+      if (cache.has(key)) return cache.get(key);
+      const snap = data.stations[key];
+      if (!snap) throw new Error('Station not in data: ' + key);
+      const lv = liveMap && liveMap[key];
+      const st = lv && lv.rows && lv.rows.length ? liveStationFrom(data, snap, lv) : snap;
+      cache.set(key, st);
+      total++;
+      if (st.live) liveCount++;
+      return st;
+    };
+
+    const startCredits = route.endCredits - route.totalProfit;
+    let credits = startCredits, totalProfit = 0;
+    const hops = route.hops.map((h) => {
+      const origin = stationFor(h.from.key);
+      const segs = h.segments && h.segments.length ? h.segments : [{ to: h.to, distLy: h.distLy, jumps: h.jumps, path: null }];
+      const stops = segs.map((sg) => stationFor(sg.to.key));
+      const spend = Math.max(0, credits - insurance);
+      let picks, profit, atOf = null;
+      if (stops.length > 1) {
+        const r = splitLoad(origin, stops[0], stops[1], spend, capacity, blocked, minP, impact);
+        picks = r.picks; profit = r.total; atOf = (p) => p.st;
+      } else if (impact > 0) {
+        const r = impactLoad(origin, stops[0], spend, capacity, blocked, minP, impact, true);
+        picks = r.picks; profit = r.total;
+      } else {
+        const r = bestLoad(origin, stops[0], spend, capacity, blocked, minP);
+        picks = r.picks; profit = r.total;
+      }
+      credits += profit;
+      totalProfit += profit;
+      return Object.assign({}, h, {
+        from: slim(origin),
+        to: slim(stops[stops.length - 1]),
+        segments: segs.map((sg, i) => Object.assign({}, sg, { to: slim(stops[i]) })),
+        load: describeLoad(picks, data.commodities, atOf),
+        profit,
+      });
+    });
+
+    return Object.assign({}, route, {
+      totalProfit,
+      endCredits: startCredits + totalProfit,
+      profitPerHour: route.totalTime > 0 ? (totalProfit / route.totalTime) * 3600 : 0,
+      hops,
+      snapshotProfit: route.snapshotProfit != null ? route.snapshotProfit : route.totalProfit,
+      live: { checked: liveCount, total, at: Date.now() },
+    });
+  }
+
   function reachRadius(opts) {
     const ly = Math.max(1, opts.lyPer || 20);
     return ly * (opts.jumpsPer === 0 ? 0 : (opts.jumpsPer || 2)) * Math.max(1, Math.floor(opts.hops || 2));
@@ -881,7 +978,7 @@
     return prep.stations.length;
   }
 
-  const api = { createContext, countStations, reachRadius, findRoutes, bestSingleTrade, bestLoad, impactLoad, splitLoad, dist3, isBlockedCommodity };
+  const api = { createContext, countStations, reachRadius, repriceRoute, findRoutes, bestSingleTrade, bestLoad, impactLoad, splitLoad, dist3, isBlockedCommodity };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.TDOptimizer = api;
 })(typeof self !== 'undefined' ? self : this);

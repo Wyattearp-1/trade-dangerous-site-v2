@@ -124,6 +124,11 @@
         };
       },
 
+      reprice(args) {
+        if (!DATA) throw new Error('Data not loaded yet');
+        return root.TDOptimizer.repriceRoute(DATA, args.route, args.live, args.opts);
+      },
+
       async quick(args, onProgress) {
         if (!DATA) throw new Error('Data not loaded yet');
         if (DATA.tiled) {

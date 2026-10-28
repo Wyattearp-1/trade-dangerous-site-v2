@@ -155,7 +155,7 @@ jobs:
         run: |
           set -e
           mkdir _site
-          cp index.html style.css data.js optimizer.js engine.js worker.js app.js _site/
+          cp index.html style.css data.js optimizer.js live.js engine.js worker.js app.js _site/
           if [ -f _data/trade-data.json ]; then
             cp _data/trade-*.json _site/
             echo "Using published market data."

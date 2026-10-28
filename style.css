@@ -538,3 +538,24 @@ button.secondary.small { padding: 4px 12px; font-size: 0.8rem; border-radius: 7p
 .pill .part { font-weight: 400; letter-spacing: 0; opacity: 0.85; }
 .leg-total { margin: 6px 0 0 3px; padding-left: 12px; }
 .route-meta b { color: var(--amber); font-weight: 600; }
+
+/* ---------- live price check ---------- */
+.live-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin: 0 0 10px; font-size: 0.85rem; }
+.live-bar[hidden] { display: none; }
+.live-bar .checkbox { margin: 0; }
+.live-status { color: var(--ink-dim); }
+.live-status.busy::before { content: "●"; color: var(--amber); margin-right: 6px; animation: livepulse 1s ease-in-out infinite; }
+.live-status.good { color: var(--profit); }
+.live-status.warn { color: var(--warn); }
+.live-status.bad { color: #ff6b6b; }
+@keyframes livepulse { 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .live-status.busy::before { animation: none; } }
+.live-badge { font-family: var(--mono); font-size: 0.72rem; padding: 3px 8px; border-radius: 5px; border: 1px solid var(--line); color: var(--ink-dim); white-space: nowrap; }
+.live-badge.good { color: var(--profit); border-color: rgba(95, 217, 127, 0.55); background: rgba(95, 217, 127, 0.1); }
+.live-badge.warn { color: var(--warn); border-color: rgba(232, 193, 74, 0.55); background: rgba(232, 193, 74, 0.1); }
+.live-badge.bad { color: #ff6b6b; border-color: rgba(255, 107, 107, 0.55); background: rgba(255, 107, 107, 0.1); }
+.tag.age.live { color: var(--profit); border-color: rgba(95, 217, 127, 0.55); border-style: solid; }
+.live-test { list-style: none; padding: 0; margin: 8px 0; }
+.live-test li { padding: 6px 10px; margin-bottom: 4px; border-radius: 6px; border: 1px solid var(--line); font-size: 0.88rem; }
+.live-test li.good { border-color: rgba(95, 217, 127, 0.55); }
+.live-test li.bad { border-color: rgba(255, 107, 107, 0.55); }

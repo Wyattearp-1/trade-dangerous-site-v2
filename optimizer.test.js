@@ -226,6 +226,37 @@ test('split cargo across two stops beats the best single stop when demand is sma
   assert.ok(at0 === 4 || at1 === 4, 'the 4 high-paying units are sold at the HIGH station');
 });
 
+
+test('repriceRoute re-plans with live prices, falling back to the snapshot where there is none', () => {
+  const { repriceRoute } = require('../optimizer.js');
+  const d = makeData({ S: [0, 0, 0], T: [5, 0, 0], U: [10, 0, 0] }, [
+    { key: 'S/HOME', system: 'S', rows: [[0, 100, 0, 1e6, 0]] },
+    { key: 'T/MID', system: 'T', rows: [[0, 0, 300, 0, 1e6], [1, 50, 0, 1e6, 0]] },
+    { key: 'U/END', system: 'U', rows: [[1, 0, 250, 0, 1e6]] },
+  ]);
+  const o = Object.assign({}, base, { startKey: 'S/HOME', hops: 2, jumpsPer: 1, lyPer: 6, capacity: 10, credits: 1e5 });
+  const route = findRoutes(d, o).routes[0];
+  assert.strictEqual(route.totalProfit, 2000 + 2000); // 10 x (300-100), then 10 x (250-50)
+  const ro = { capacity: 10, minProfitPerUnit: 1, impact: 0 };
+  // no live data at all: identical numbers, nothing marked live
+  const none = repriceRoute(d, route, {}, ro);
+  assert.strictEqual(none.totalProfit, route.totalProfit);
+  assert.strictEqual(none.live.checked, 0);
+  // live data for the middle station only: sell price crashed to 120, buy price for commodity 1 unchanged
+  const live = { 'T/MID': { rows: [['ALPHA', 0, 120, 0, 1e6], ['Beta', 50, 0, 1e6, 0]], updated: 1700000000 } };
+  const part = repriceRoute(d, route, live, ro);
+  assert.strictEqual(part.hops[0].profit, 200);   // 10 x (120-100)
+  assert.strictEqual(part.hops[1].profit, 2000);  // second leg still uses the snapshot for U/END
+  assert.strictEqual(part.totalProfit, 2200);
+  assert.strictEqual(part.snapshotProfit, 4000);
+  assert.strictEqual(part.live.checked, 1);
+  assert.strictEqual(part.live.total, 3);
+  assert.ok(part.hops[0].to.live === true && part.hops[1].from.live === true);
+  assert.strictEqual(part.hops[0].to.updated, 1700000000);
+  // the original route object is not modified
+  assert.strictEqual(route.totalProfit, 4000);
+});
+
 async function asyncTests() {
   const dir = path.join(__dirname, '..');
   const fetched = [];
@@ -282,6 +313,75 @@ async function asyncTests() {
     assert.ok(loose.routes[0].totalProfit >= strict.routes[0].totalProfit, 'looser window is never worse (got ' + loose.routes[0].totalProfit + ')');
     passed++; console.log('  ok   looser price-age limit never scores lower than a stricter one');
   } catch (e) { console.error('  FAIL age monotonic\n       ' + e.stack); process.exitCode = 1; }
+
+
+  // ---- live price service (mocked network)
+  try {
+    const live = require('../live.js');
+    live.reset();
+    // parsers
+    const edsm = live.parseEdsm({ name: 'Sol', sName: 'Abraham Lincoln', commodities: [{ id: 'gold', name: 'Gold', buyPrice: 9000, stock: 12, sellPrice: 8800, demand: 0 }], updateTime: { market: '2026-10-28 12:00:00' } });
+    assert.deepStrictEqual(edsm.rows[0], ['Gold', 9000, 8800, 12, 0]);
+    assert.strictEqual(edsm.updated, Date.UTC(2026, 9, 28, 12, 0, 0) / 1000);
+    assert.strictEqual(live.parseEdsm({}), null);
+    const ard = live.parseArdent([
+      { stationName: 'Abraham Lincoln', commodityName: 'Gold', buyPrice: 9100, sellPrice: 8900, stock: 5, demand: 1, updatedAt: '2026-10-28T12:30:00.000Z' },
+      { stationName: 'Other Port', commodityName: 'Gold', buyPrice: 1, sellPrice: 1, stock: 1, demand: 1 },
+    ], 'ABRAHAM LINCOLN');
+    assert.strictEqual(ard.rows.length, 1);
+    assert.strictEqual(ard.rows[0][1], 9100);
+    assert.strictEqual(live.parseArdent([], 'X'), null);
+    assert.strictEqual(live.titleCase("PICCARD'S FOLLY"), "Piccard's Folly");
+    assert.strictEqual(live.titleCase('LTT 6377/HUB-ONE'.split('/')[1]), 'Hub-One');
+
+    // lookups: first provider works, results are cached
+    let calls = 0;
+    const realFetch = global.fetch;
+    global.fetch = async (u) => {
+      calls++;
+      if (/edsm\.net/.test(u)) return new Response(JSON.stringify({ commodities: [{ name: 'Gold', buyPrice: 100, stock: 5, sellPrice: 90, demand: 5 }] }), { status: 200 });
+      return new Response('{}', { status: 404 });
+    };
+    const prog = [];
+    const out = await live.fetchMany(['SOL/ABRAHAM LINCOLN', 'SOL/GALILEO', 'SOL/ABRAHAM LINCOLN'], (d, t) => prog.push(d + '/' + t));
+    assert.strictEqual(Object.keys(out).length, 2);
+    assert.strictEqual(out['SOL/GALILEO'].provider, 'EDSM');
+    assert.strictEqual(prog[prog.length - 1], '2/2');
+    const before = calls;
+    await live.fetchMany(['SOL/ABRAHAM LINCOLN']);
+    assert.strictEqual(calls, before, 'second lookup is served from the cache');
+
+    // failure: falls back to the second provider, then to null; never throws
+    live.reset();
+    global.fetch = async (u) => {
+      if (/edsm\.net/.test(u)) throw new TypeError('Failed to fetch');
+      return new Response(JSON.stringify([{ stationName: 'Galileo', commodityName: 'Gold', buyPrice: 7, sellPrice: 6, stock: 1, demand: 1 }]), { status: 200 });
+    };
+    const viaArdent = await live.fetchStation('SOL/GALILEO');
+    assert.strictEqual(viaArdent.provider, 'Ardent');
+    live.reset();
+    global.fetch = async () => { throw new TypeError('Failed to fetch'); };
+    assert.strictEqual(await live.fetchStation('SOL/GALILEO'), null);
+    assert.ok(/Failed to fetch/.test(live.lastError));
+    // rate limited: pauses further lookups
+    live.reset();
+    let rl = 0;
+    global.fetch = async () => { rl++; return new Response('', { status: 429 }); };
+    assert.strictEqual(await live.fetchStation('SOL/A'), null);
+    const rlCalls = rl;
+    assert.strictEqual(await live.fetchStation('SOL/B'), null);
+    assert.strictEqual(rl, rlCalls, 'no more requests while paused after HTTP 429');
+    // self test reports per provider
+    live.reset();
+    global.fetch = async (u) => (/edsm\.net/.test(u) ? new Response(JSON.stringify({ commodities: [{ name: 'Gold', buyPrice: 1, stock: 1, sellPrice: 1, demand: 1 }] }), { status: 200 }) : new Response('', { status: 500 }));
+    const st = await live.selfTest();
+    assert.strictEqual(st.length, 2);
+    assert.strictEqual(st[0].ok, true);
+    assert.strictEqual(st[1].ok, false);
+    global.fetch = realFetch;
+    live.reset();
+    passed++; console.log('  ok   live price service: parsing, caching, fallback, rate-limit pause, self test');
+  } catch (e) { console.error('  FAIL live service\n       ' + e.stack); process.exitCode = 1; }
 
   try {
     const { tilesNear } = require('../data.js');

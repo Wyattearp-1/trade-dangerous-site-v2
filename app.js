@@ -98,6 +98,7 @@
       },
       run: (opts, onProgress) => call('run', { opts }, onProgress),
       quick: (args, onProgress) => call('quick', { args }, onProgress),
+      reprice: (args) => call('reprice', { args }),
     };
   }
 
@@ -109,6 +110,7 @@
       load: (url, onProgress) => engine.load(url, onProgress),
       run: async (opts, onProgress) => { await tick(); return engine.run(opts, onProgress); },
       quick: async (args, onProgress) => engine.quick(args, onProgress),
+      reprice: async (args) => engine.reprice(args),
     };
   }
 
@@ -279,7 +281,7 @@
     'towardSystem', 'avoidSystems', 'avoidStations', 'avoidCommodities', 'sortBy', 'minProfit',
     'minRouteProfit', 'padSize', 'maxStationLs', 'maxAge', 'effort', 'maxResults',
     'objective', 'pathMode', 'impact'];
-  const CHECK_FIELDS = ['loop', 'noRevisit', 'includeOdyssey', 'includeCarriers', 'split'];
+  const CHECK_FIELDS = ['loop', 'noRevisit', 'includeOdyssey', 'includeCarriers', 'split', 'liveAuto'];
   const DEFAULTS = {};
 
   function captureDefaults() {
@@ -402,6 +404,12 @@
     return Math.floor(m / 60) + ' h ' + String(m % 60).padStart(2, '0') + ' min';
   }
 
+  /** Price-age tag: LIVE when the market was checked just now, otherwise the snapshot's age. */
+  function ageTag(st) {
+    if (st.live) return ' <span class="tag age live">LIVE' + (st.updated ? ' · ' + fmtAge(st.updated) : '') + '</span>';
+    return st.updated ? ' <span class="tag age">prices ' + fmtAge(st.updated) + '</span>' : '';
+  }
+
   function stationBadges(st) {
     const bits = [];
     if (st.pad) bits.push('<span class="tag">' + escapeHtml(st.pad) + ' pad</span>');
@@ -493,7 +501,7 @@
       ? '<div class="step step-note"><span class="pill pass">NO CARGO</span> Nothing profitable to carry on this leg. Fly to ' + stationLinkHtml(h.from) + ' and continue.</div>'
       : '<div class="step step-buy">' +
           '<div class="step-label"><span class="pill buy">BUY</span> at ' + stationLinkHtml(h.from) + where + '</div>' +
-          (h.from.pad ? '<div class="step-meta">' + stationBadges(h.from) + (h.from.updated ? ' <span class="tag age">prices ' + fmtAge(h.from.updated) + '</span>' : '') + '</div>' : '') +
+          (h.from.pad ? '<div class="step-meta">' + stationBadges(h.from) + ageTag(h.from) + '</div>' : '') +
           buyTableHtml(load) +
           '<div class="step-sum">You spend <b>' + fmtCr(t.cost) + '</b> on <b>' + fmtNum(t.units) + ' t</b> of cargo.</div>' +
         '</div>';
@@ -506,7 +514,7 @@
         sellSteps += flyHtml(seg) +
           '<div class="step step-sell">' +
             '<div class="step-label"><span class="pill sell">' + label + '</span> at ' + stationLinkHtml(seg.to) + '</div>' +
-            (seg.to.pad ? '<div class="step-meta">' + stationBadges(seg.to) + (seg.to.updated ? ' <span class="tag age">prices ' + fmtAge(seg.to.updated) + '</span>' : '') + '</div>' : '') +
+            (seg.to.pad ? '<div class="step-meta">' + stationBadges(seg.to) + ageTag(seg.to) + '</div>' : '') +
             (part.length ? sellTableHtml(part) : '<p class="muted empty-leg">Nothing sold here.</p>') +
             '<div class="step-sum">You receive <b>' + fmtCr(pt.revenue) + '</b>' +
               (segments.length > 1 ? ' for this part.' : ', a profit of <b class="gain">+' + fmtCr(t.profit) + '</b>.') + '</div>' +
@@ -553,6 +561,19 @@
     return lines.join('\n').trim();
   }
 
+  function liveBadgeHtml(route) {
+    const lv = route.live;
+    if (!lv) return liveOn() ? '<span class="live-badge none" title="Prices are from the nightly snapshot; a live check is in progress or pending">snapshot</span>' : '';
+    if (!lv.checked) return '<span class="live-badge none" title="No live data was available for these stations, so this uses the nightly snapshot">snapshot only</span>';
+    const snap = route.snapshotProfit != null ? route.snapshotProfit : route.totalProfit;
+    const delta = route.totalProfit - snap;
+    const pct = snap > 0 ? (delta / snap) * 100 : 0;
+    const cls = delta >= -0.05 * snap ? 'good' : delta >= -0.25 * snap ? 'warn' : 'bad';
+    const sign = delta >= 0 ? '+' : '';
+    return '<span class="live-badge ' + cls + '" title="The nightly snapshot said +' + fmtNum(snap) + ' cr; live prices say +' + fmtNum(route.totalProfit) + ' cr (' + lv.checked + ' of ' + lv.total + ' stations had live data)">LIVE ' +
+      lv.checked + '/' + lv.total + ' · ' + sign + pct.toFixed(0) + '% vs snapshot</span>';
+  }
+
   function renderRoutes(routes, sortBy, maxShow) {
     const container = $('runResults');
     container.innerHTML = '';
@@ -582,6 +603,7 @@
         '<span class="route-meta">' + m.hops + ' leg' + (m.hops === 1 ? '' : 's') + ' · ' + m.dist.toFixed(1) + ' ly · ' + m.jumps + ' jump' + (m.jumps === 1 ? '' : 's') +
           (m.seconds ? ' · ~' + fmtDuration(m.seconds) + ' · <b>' + fmtNum(m.rate) + ' cr/h</b>' : '') + '</span>' +
         '<span class="total">+' + fmtCr(route.totalProfit) + '</span>';
+      head.insertAdjacentHTML ? head.insertAdjacentHTML('beforeend', liveBadgeHtml(route)) : (head.innerHTML += liveBadgeHtml(route));
       const copyBtn = document.createElement('button');
       copyBtn.type = 'button';
       copyBtn.className = 'secondary small';
@@ -660,7 +682,7 @@
         maxStationLs: Number($('maxStationLs').value) || 0,
         maxAgeHours: Number($('maxAge').value) || 0,
         // Other sort orders pick from a bigger pool of top-earning routes.
-        maxResults: (sortBy === 'profit' || sortBy === 'rate') ? maxResults : Math.min(60, maxResults * 4),
+        maxResults: (sortBy === 'profit' || sortBy === 'rate') ? Math.max(maxResults, 12) : Math.min(60, Math.max(maxResults * 4, 12)),
       },
       sortBy,
       maxShow: maxResults,
@@ -683,6 +705,8 @@
     const status = $('runStatus');
     const btn = $('runBtn');
     const seq = ++runSeq;
+    liveToken++;               // cancel any live check still running for the previous results
+    lastRunCtx = null;
     status.className = 'status';
     showWarnings([]);
 
@@ -710,6 +734,9 @@
       status.textContent = 'Evaluated ' + fmtNum(res.stats.stationsConsidered) + ' stations · ' + res.passes + ' search pass' + (res.passes === 1 ? '' : 'es') + ' (up to width ' + res.width + ') in ' + (res.ms / 1000).toFixed(1) + 's · start ' + startKey + ' · ' + res.routes.length + ' route(s)';
       showWarnings(res.warnings);
       renderRoutes(res.routes, sortBy, maxShow);
+      lastRunCtx = { opts, sortBy, maxShow };
+      $('liveBar').hidden = !res.routes.length;
+      liveCheck(false);
     } catch (err) {
       if (seq !== runSeq) return;
       status.className = 'status error';
@@ -755,7 +782,12 @@
     $('quickForm').addEventListener('submit', (e) => { e.preventDefault(); return (backend && INFO && !$('quickBtn').disabled) ? runQuick() : undefined; });
     $('sortBy').addEventListener('change', () => {
       saveSettings();
-      if (lastRoutes.length) renderRoutes(lastRoutes, $('sortBy').value, Math.min(30, Math.max(1, Number($('maxResults').value) || 8)));
+      if (lastRoutes.length) {
+        const ms = Math.min(30, Math.max(1, Number($('maxResults').value) || 8));
+        if (lastRunCtx) { lastRunCtx.sortBy = $('sortBy').value; lastRunCtx.maxShow = ms; }
+        renderRoutes(lastRoutes, $('sortBy').value, ms);
+        liveCheck(false);
+      }
     });
     $('objective').addEventListener('change', () => {
       // Searching for credits/hour is pointless if results are then ordered by total profit.
@@ -768,6 +800,113 @@
       const b = $('shareBtn');
       b.textContent = ok ? 'Link copied ✓' : 'Copy failed';
       setTimeout(() => { b.textContent = 'Copy settings link'; }, 1800);
+    });
+  }
+
+  /* ---------------- live price check ---------------- */
+
+  let liveToken = 0;
+  let lastRunCtx = null;   // { opts, sortBy, maxShow } of the search whose results are on screen
+
+  function liveOn() { return !!$('liveAuto') && $('liveAuto').checked; }
+
+  function setLiveStatus(text, kind) {
+    const el = $('liveStatus');
+    el.textContent = text;
+    el.className = 'live-status' + (kind ? ' ' + kind : '');
+  }
+
+  function routeStationKeys(r) {
+    const keys = [];
+    r.hops.forEach((h) => {
+      keys.push(h.from.key);
+      (h.segments && h.segments.length ? h.segments : [{ to: h.to }]).forEach((sg) => keys.push(sg.to.key));
+    });
+    return keys;
+  }
+
+  /**
+   * Ask the live price services for the current markets of the stations on the routes being shown, re-plan
+   * those routes with the live prices, and re-rank. Repeats (up to 3 rounds) while the visible top routes
+   * still include unchecked ones, so a route that only looked good on stale prices drops out and the next
+   * best candidate gets checked. `force` re-checks even routes already checked (used by the timer).
+   */
+  async function liveCheck(force) {
+    if (!lastRunCtx || !lastRoutes.length) return;
+    const token = ++liveToken;
+    const { opts } = lastRunCtx;
+    if (!liveOn()) { setLiveStatus('Live price checks are off.', ''); return; }
+    const started = Date.now();
+    let checkedStations = 0, liveStations = 0;
+    try {
+      for (let round = 0; round < 3; round++) {
+        const { sortBy, maxShow } = lastRunCtx;
+        const top = sortRoutes(lastRoutes, sortBy).slice(0, maxShow);
+        const todo = top.filter((r) => !r.live || (force && r.live.at < started));
+        if (!todo.length) break;
+        const keys = [];
+        todo.forEach((r) => keys.push(...routeStationKeys(r)));
+        setLiveStatus('Checking live prices…', 'busy');
+        const live = await window.TDLive.fetchMany(keys, (d, t) => {
+          if (token === liveToken) setLiveStatus('Checking live prices… ' + d + '/' + t + ' stations', 'busy');
+        });
+        if (token !== liveToken) return;
+        for (const r of todo) {
+          const lm = {};
+          routeStationKeys(r).forEach((k) => { if (live[k]) lm[k] = live[k]; });
+          let rep;
+          try { rep = await backend.reprice({ route: r, live: lm, opts }); }
+          catch (e) { rep = Object.assign({}, r, { live: { checked: 0, total: 0, at: Date.now() } }); }
+          if (token !== liveToken) return;
+          const idx = lastRoutes.indexOf(r);
+          if (idx >= 0) lastRoutes[idx] = rep;
+        }
+        const seen = new Set(keys);
+        checkedStations += seen.size;
+        seen.forEach((k) => { if (live[k]) liveStations++; });
+        renderRoutes(lastRoutes, lastRunCtx.sortBy, lastRunCtx.maxShow);
+      }
+    } catch (e) {
+      if (token === liveToken) setLiveStatus('Live price check failed: ' + e.message, 'bad');
+      return;
+    }
+    if (token !== liveToken) return;
+    const hhmm = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (checkedStations === 0) {
+      setLiveStatus('Live prices checked at ' + hhmm + '.', 'good');
+    } else if (liveStations === 0) {
+      const why = window.TDLive.lastError ? ' (' + window.TDLive.lastError + ')' : '';
+      setLiveStatus('Live prices are unavailable right now' + why + '. Showing the nightly snapshot. Retrying in a few minutes.', 'warn');
+    } else {
+      setLiveStatus('Live prices checked at ' + hhmm + ': ' + liveStations + ' of ' + checkedStations + ' stations had live data' +
+        (liveStations < checkedStations ? ' (the rest use the snapshot)' : '') + '. Routes are ranked using live prices. Rechecking every 5 minutes.', 'good');
+    }
+  }
+
+  function setupLive() {
+    $('liveAuto').addEventListener('change', () => {
+      saveSettings();
+      if (liveOn()) liveCheck(false);
+      else { liveToken++; setLiveStatus('Live price checks are off.', ''); renderRoutes(lastRoutes, lastRunCtx ? lastRunCtx.sortBy : 'profit', lastRunCtx ? lastRunCtx.maxShow : 8); }
+    });
+    // Keep prices fresh while the results stay on screen.
+    setInterval(() => {
+      if (document.hidden || !lastRunCtx || !lastRoutes.length || !liveOn()) return;
+      liveCheck(true);
+    }, 5 * 60 * 1000);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && lastRunCtx && lastRoutes.length && liveOn()) {
+        const newest = Math.max(0, ...lastRoutes.map((r) => (r.live ? r.live.at : 0)));
+        if (Date.now() - newest > 4 * 60 * 1000) liveCheck(true);
+      }
+    });
+    $('liveTestBtn').addEventListener('click', async () => {
+      const out = $('liveTestOut');
+      out.innerHTML = '<p class="muted">Testing…</p>';
+      const res = await window.TDLive.selfTest('SOL', 'ABRAHAM LINCOLN');
+      out.innerHTML = '<ul class="live-test">' + res.map((r) => '<li class="' + (r.ok ? 'good' : 'bad') + '"><b>' + escapeHtml(r.provider) + '</b>: ' +
+        (r.ok ? 'working' : 'not working') + ' (' + r.ms + ' ms) — ' + escapeHtml(r.detail) + '</li>').join('') + '</ul>' +
+        (res.some((r) => r.ok) ? '' : '<p class="muted">With no working service, routes keep using the nightly snapshot.</p>');
     });
   }
 
@@ -805,6 +944,7 @@
     loadSavedSettings();
     const fromUrl = settingsFromUrl();
     setupForms();
+    setupLive();
     try {
       INFO = await loadData();
     } catch (err) {

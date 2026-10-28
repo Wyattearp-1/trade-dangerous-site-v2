@@ -214,6 +214,10 @@
         </div>
       </form>
 
+      <div id="liveBar" class="live-bar" hidden>
+        <label class="checkbox"><input type="checkbox" id="liveAuto" checked> Check live prices automatically</label>
+        <span id="liveStatus" class="live-status" role="status" aria-live="polite"></span>
+      </div>
       <div id="runStatus" class="status" role="status" aria-live="polite"></div>
       <ul id="runWarnings" class="warnings" aria-live="polite"></ul>
       <div id="runResults" class="results"></div>
@@ -264,6 +268,17 @@
           you commit your cargo.
         </p>
         <p id="aboutStamp"></p>
+        <h2>Live prices</h2>
+        <p>
+          The snapshot is rebuilt from a nightly dump, so prices can be hours old. After each search the page
+          automatically asks public community services (<a href="https://www.edsm.net/" target="_blank" rel="noopener">EDSM</a>
+          and <a href="https://ardent-insight.com/" target="_blank" rel="noopener">Ardent</a>, both fed by players’ game uploads, so usually minutes old)
+          for the <em>current</em> markets of the stations on your routes, re-plans each route with them, and re-ranks the
+          results. It repeats every 5 minutes while results are on screen. If a service is down or blocked, the page quietly
+          keeps using the snapshot. This is as live as a website can get without a server listening to the game’s data feed.
+        </p>
+        <p><button type="button" class="secondary" id="liveTestBtn">Test live price connection</button></p>
+        <div id="liveTestOut" aria-live="polite"></div>
       </div>
     </section>
   </main>
@@ -276,6 +291,7 @@
 
 <script src="data.js"></script>
 <script src="optimizer.js"></script>
+<script src="live.js"></script>
 <script src="engine.js"></script>
 <script src="app.js"></script>
 </body>
