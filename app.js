@@ -731,7 +731,7 @@
     try {
       const res = await backend.run(opts, regionProgress(status));
       if (seq !== runSeq) return;
-      status.textContent = 'Evaluated ' + fmtNum(res.stats.stationsConsidered) + ' stations · ' + res.passes + ' search pass' + (res.passes === 1 ? '' : 'es') + ' (up to width ' + res.width + ') in ' + (res.ms / 1000).toFixed(1) + 's · start ' + startKey + ' · ' + res.routes.length + ' route(s)';
+      status.textContent = 'Evaluated ' + fmtNum(res.stats.stationsConsidered) + (res.stats.inReach ? ' of ' + fmtNum(res.stats.inReach) + ' stations in reach · ' : ' stations · ') + res.passes + ' search pass' + (res.passes === 1 ? '' : 'es') + ' (up to width ' + res.width + ') in ' + (res.ms / 1000).toFixed(1) + 's · start ' + startKey + ' · ' + res.routes.length + ' route(s)';
       showWarnings(res.warnings);
       renderRoutes(res.routes, sortBy, maxShow);
       lastRunCtx = { opts, sortBy, maxShow };

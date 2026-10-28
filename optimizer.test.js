@@ -15,7 +15,7 @@ function test(name, fn) {
 const COMMS = ['ALPHA', 'BETA', 'GAMMA', 'DELTA'];
 /** station spec: { key, system, pad?, flags?, updated?, rows: [[commodityIdx, buy, sell, supply, demand], ...] } */
 function makeData(systems, stations) {
-  const meta = { version: 2, commodities: COMMS, systems, generated_at: '2026-01-01T00:00:00Z' };
+  const meta = { version: 2, commodities: COMMS, systems, generated_at: new Date().toISOString() };
   const st = {};
   for (const s of stations) st[s.key] = [s.pad || 'L', s.ls || 0, s.flags || 0, s.updated || 0, [].concat(...s.rows)];
   return buildDataset(meta, [{ stations: st }]);
@@ -257,6 +257,37 @@ test('repriceRoute re-plans with live prices, falling back to the snapshot where
   assert.strictEqual(route.totalProfit, 4000);
 });
 
+
+test('price age is measured as of the snapshot build time, not the current time', () => {
+  const built = Date.now() / 1000 - 10 * 86400;           // snapshot is 10 days old
+  const meta = { version: 2, commodities: COMMS, systems: { S: [0, 0, 0], N: [3, 0, 0], O: [4, 0, 0] }, generated_at: new Date(built * 1000).toISOString() };
+  const st = {
+    'S/HOME': ['L', 0, 0, built - 60, [0, 100, 0, 1e6, 0]],
+    'N/NEWISH': ['L', 0, 0, built - 3 * 3600, [0, 0, 300, 0, 1e6]],        // 3 h old when the snapshot was built
+    'O/STALE': ['L', 0, 0, built - 5 * 86400, [0, 0, 900, 0, 1e6]],         // 5 days old when it was built
+  };
+  const d = buildDataset(meta, [{ stations: st }]);
+  const r = findRoutes(d, Object.assign({}, base, { startKey: 'S/HOME', maxAgeHours: 24 }));
+  assert.strictEqual(r.routes.length, 1);
+  assert.strictEqual(r.routes[0].hops[0].to.key, 'N/NEWISH');
+});
+
+test('when filters remove most stations, the result says which filters and what to try', () => {
+  const now = Math.floor(Date.now() / 1000);
+  const systems = { S: [0, 0, 0] }; const rows = [{ key: 'S/HOME', system: 'S', updated: now, rows: [[0, 100, 0, 1e6, 0]] }];
+  for (let i = 0; i < 60; i++) { systems['K' + i] = [1 + i * 0.1, 0, 0]; rows.push({ key: 'K' + i + '/X', system: 'K' + i, pad: i % 3 ? 'S' : 'L', updated: now - 3 * 86400, rows: [[0, 0, 300, 0, 1e6]] }); }
+  const d = makeData(systems, rows);
+  const r = findRoutes(d, Object.assign({}, base, { startKey: 'S/HOME', jumpsPer: 5, maxAgeHours: 24, requirePad: 'L' }));
+  assert.strictEqual(r.stats.inReach, 60);
+  assert.strictEqual(r.stats.rejected.age, 60);
+  assert.ok(r.stats.rejected.pad > 30);
+  const msg = r.warnings.find((w) => /passed your filters/.test(w) && /Removed by/.test(w));
+  assert.ok(msg && /price age \(60\)/.test(msg) && /Max price age/.test(msg), msg);
+  // a healthy pool produces no such warning
+  const ok = findRoutes(d, Object.assign({}, base, { startKey: 'S/HOME', jumpsPer: 5 }));
+  assert.ok(!ok.warnings.some((w) => /Removed by/.test(w)));
+});
+
 async function asyncTests() {
   const dir = path.join(__dirname, '..');
   const fetched = [];
@@ -300,7 +331,7 @@ async function asyncTests() {
     // fresh route: small first hop (+500) then a big second hop (+5000)
     st['G/MID'] = ['L', 0, 0, now - 600, [].concat(row(1, 0, 150, 0, 1e6), row(2, 100, 0, 1e6, 0))];
     st['H/END'] = ['L', 0, 0, now - 600, [].concat(row(2, 0, 600, 0, 1e6))];
-    const meta = { version: 2, commodities: ['A', 'B', 'C'], systems, shards: [{ file: 'x.json' }], generated_at: '2026-01-01T00:00:00Z' };
+    const meta = { version: 2, commodities: ['A', 'B', 'C'], systems, shards: [{ file: 'x.json' }], generated_at: new Date().toISOString() };
     const realFetch = global.fetch;
     global.fetch = async (u) => new Response(JSON.stringify(u === 'meta.json' ? meta : { stations: st }), { status: 200 });
     const e2 = createEngine();

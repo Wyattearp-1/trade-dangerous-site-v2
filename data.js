@@ -104,6 +104,7 @@
   function buildDataset(meta, parts) {
     const data = {
       generated_at: meta.generated_at || null,
+      generatedAt: Date.parse(meta.generated_at || '') / 1000 || 0,
       source: meta.source || '',
       commodities: (meta.commodities || []).slice(),
       systems: normalizeSystems(meta.systems),
@@ -189,6 +190,7 @@
 
     const data = {
       generated_at: meta.generated_at || null,
+      generatedAt: Date.parse(meta.generated_at || '') / 1000 || 0,
       source: meta.source || '',
       commodities: (meta.commodities || []).slice(),
       systems: {},

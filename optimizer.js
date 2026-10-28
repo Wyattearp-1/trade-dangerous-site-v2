@@ -45,7 +45,9 @@
     const avoidCommodities = new Set(upperList(opts.avoidCommodities));
     const startKeyU = String(opts.startKey || '').toUpperCase();
     const maxAgeSec = data.hasAges && opts.maxAgeHours > 0 ? opts.maxAgeHours * 3600 : 0;
-    const nowSec = Date.now() / 1000;
+    // Price age is measured as of when the snapshot was built, so the pool of stations does not shrink all day
+    // as the snapshot ages (the automatic live check refreshes prices for the routes you see).
+    const nowSec = data.generatedAt || Date.now() / 1000;
     const req = opts.requirePad || 'any';
 
     const blocked = new Uint8Array(data.commodities.length);
@@ -56,6 +58,8 @@
     const center = opts._center || null;   // route start; nothing farther than _reach can be visited
     const reach = opts._reach > 0 ? opts._reach + 1e-6 : 0;
     const stations = [];
+    let inReach = 0;
+    const rejected = { age: 0, pad: 0, carrier: 0, planetary: 0, ls: 0, avoid: 0, noMarket: 0 };
     for (const key of Object.keys(data.stations)) {
       const st = data.stations[key];
       const isStart = key.toUpperCase() === startKeyU;
@@ -64,15 +68,17 @@
           const sp = data.systems[st.system];
           if (!sp || dist3(sp, center) > reach) continue;
         }
-        if (st.ids.length === 0) continue;
-        if (avoidSystems.has(st.system.toUpperCase())) continue;
-        if (avoidStations.size && (avoidStations.has(key.toUpperCase()) || avoidStations.has(st.name.toUpperCase()))) continue;
-        if (opts.noPlanetary && st.planetary) continue;
-        if (!opts.includeCarriers && st.carrier) continue;
-        if (opts.maxStationLs > 0 && st.distLs > opts.maxStationLs) continue;
-        if (req === 'L' && st.pad !== 'L') continue;
-        if (req === 'M' && st.pad === 'S') continue;
-        if (maxAgeSec && (!st.updated || nowSec - st.updated > maxAgeSec)) continue;
+        inReach++;
+        if (st.ids.length === 0) { rejected.noMarket++; continue; }
+        let drop = false;
+        if (avoidSystems.has(st.system.toUpperCase()) ||
+            (avoidStations.size && (avoidStations.has(key.toUpperCase()) || avoidStations.has(st.name.toUpperCase())))) { rejected.avoid++; drop = true; }
+        if (opts.noPlanetary && st.planetary) { rejected.planetary++; drop = true; }
+        if (!opts.includeCarriers && st.carrier) { rejected.carrier++; drop = true; }
+        if (opts.maxStationLs > 0 && st.distLs > opts.maxStationLs) { rejected.ls++; drop = true; }
+        if ((req === 'L' && st.pad !== 'L') || (req === 'M' && st.pad === 'S')) { rejected.pad++; drop = true; }
+        if (maxAgeSec && (!st.updated || nowSec - st.updated > maxAgeSec)) { rejected.age++; drop = true; }
+        if (drop) continue;
       }
       const sys = data.systems[st.system];
       if (!sys) continue;
@@ -111,7 +117,7 @@
       list.push(st);
     }
 
-    return { stations, neighboursWithin, blocked, bySystem };
+    return { stations, neighboursWithin, blocked, bySystem, inReach, rejected };
   }
 
   /* ---------------- cargo loading ---------------- */
@@ -511,6 +517,28 @@
     return out.reverse();
   }
 
+
+  /** Plain-language reason a search saw very few stations (null when the pool looks healthy). */
+  function filterExplanation(prep, opts) {
+    const used = prep.stations.length;
+    if (!prep.inReach || used >= Math.max(40, prep.inReach * 0.1)) return null;
+    const r = prep.rejected, n = (x) => x.toLocaleString('en-US');
+    const labels = [['age', 'price age'], ['pad', 'pad size'], ['carrier', 'fleet carriers'], ['planetary', 'surface stations'],
+      ['ls', 'distance from the star'], ['avoid', 'your avoid lists'], ['noMarket', 'no market data']];
+    const parts = labels.filter(([k]) => r[k] > 0).sort((a, b) => r[b[0]] - r[a[0]]).map(([k, t]) => t + ' (' + n(r[k]) + ')');
+    const top = labels.filter(([k]) => r[k] > 0).sort((a, b) => r[b[0]] - r[a[0]])[0];
+    const hint = !top ? '' : ({
+      age: ' Try a longer "Max price age": the data is a nightly snapshot, so very short limits remove most stations.',
+      pad: ' Try a smaller pad requirement if your ship can use medium or small pads.',
+      carrier: ' Tick "Include fleet carriers" to widen the pool.',
+      planetary: ' Tick "Include Odyssey / planetary stations" to widen the pool.',
+      ls: ' Raise or clear "Max station distance from star".',
+      avoid: ' Check your avoid lists.',
+      noMarket: '',
+    })[top[0]];
+    return 'Only ' + n(used) + ' of ' + n(prep.inReach) + ' stations within reach passed your filters. Removed by: ' + parts.join(', ') + ' (filters overlap).' + hint;
+  }
+
   /* ---------------- route search ---------------- */
 
   /**
@@ -836,10 +864,12 @@
         }),
       }));
 
+    const why = filterExplanation(prep, opts);
+    if (why) warnings.push(why);
     if (!routes.length) {
       warnings.push(stations.length + ' stations passed your filters, but none offered a profitable trade within reach.');
     }
-    return { routes, warnings, stats: { stationsConsidered: stations.length } };
+    return { routes, warnings, stats: { stationsConsidered: stations.length, inReach: prep.inReach, rejected: prep.rejected } };
   }
 
   /** Single best A -> B load (quick-trade tab). Also checks the reverse direction. */
