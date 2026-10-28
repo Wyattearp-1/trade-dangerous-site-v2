@@ -278,7 +278,7 @@
   const TEXT_FIELDS = ['startStation', 'credits', 'insurance', 'capacity', 'lyPer', 'jumpsPer', 'hops',
     'towardSystem', 'avoidSystems', 'avoidStations', 'avoidCommodities', 'sortBy', 'minProfit',
     'minRouteProfit', 'padSize', 'maxStationLs', 'maxAge', 'effort', 'maxResults',
-    'objective', 'pathMode', 'impact', 'secPerJump', 'secPerStop'];
+    'objective', 'pathMode', 'impact'];
   const CHECK_FIELDS = ['loop', 'noRevisit', 'includeOdyssey', 'includeCarriers', 'split'];
   const DEFAULTS = {};
 
@@ -655,8 +655,6 @@
         pathMode: $('pathMode').value === 'line' ? 'line' : 'graph',
         impact: Number($('impact').value) || 0,
         split: $('split').checked,
-        secPerJump: Number($('secPerJump').value),
-        secPerStop: Number($('secPerStop').value),
         widths: (EFFORT[$('effort').value] || EFFORT.thorough).widths,
         requirePad: $('padSize').value,
         maxStationLs: Number($('maxStationLs').value) || 0,

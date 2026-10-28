@@ -32,9 +32,10 @@ sample dataset.
   * **Maximum total credits** (default): every hop is scored by the cargo profit it makes and the search keeps the
     richest partial routes. Distance is a reach limit only; it is displayed but never traded off against profit.
   * **Credits per hour:** profit divided by an estimated trip time. Time per leg = seconds per jump x jumps +
-    supercruise to the station (estimated from its distance from the star: 25 s + 1.25 x sqrt(Ls)) + seconds per
-    station stop (docking, trading, launching). Both per-jump and per-stop times are adjustable. These are estimates,
-    not measurements. Rate mode also runs the max-credits search and pools the two, so it can never come back
+    supercruise to the station (estimated from its distance from the star: 25 s + 1.25 x sqrt(Ls)) + a station stop
+    (docking, trading, launching). Fixed assumptions: 50 s per jump and 150 s per stop (constants `secJ` / `secStop` in
+    `optimizer.js` if you want to change them). These are rough estimates, not measurements, and are not Inara's formula
+    (Inara doesn't publish how it computes per-hour figures). Rate mode also runs the max-credits search and pools the two, so it can never come back
     slower (per hour) than the max-credits route.
 * **Price movement (Light / Medium / Heavy / Off):** buying raises a station's price and selling lowers it as you use up
   its stock or demand. The average price over x units is `p * (1 + k*x/(2*stock))` when buying and

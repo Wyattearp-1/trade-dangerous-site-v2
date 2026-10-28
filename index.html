@@ -114,7 +114,7 @@
               <option value="profit" selected>Maximum total credits</option>
               <option value="rate">Credits per hour</option>
             </select>
-            <p class="field-hint">Credits per hour divides profit by an estimated trip time (jumps, supercruise to the station, docking). Tune the time estimates under More options.</p>
+            <p class="field-hint">Credits per hour divides profit by an estimated trip time: about 50 s per jump, 2½ min per station stop, plus supercruise to the station. These are fixed estimates, not Inara’s numbers (Inara doesn’t publish its formula).</p>
           </div>
           <div class="field">
             <label for="pathMode">Jump pathing</label>
@@ -204,16 +204,6 @@
             <div class="field">
               <label for="maxResults">Max routes shown</label>
               <input type="number" id="maxResults" name="maxResults" min="1" max="30" step="1" value="8" inputmode="numeric">
-            </div>
-            <div class="field">
-              <label for="secPerJump">Seconds per jump</label>
-              <input type="number" id="secPerJump" name="secPerJump" min="0" step="5" value="50" inputmode="numeric">
-              <p class="field-hint">Charge, jump, cool down and scoop. Used for credits per hour and the time shown on routes.</p>
-            </div>
-            <div class="field">
-              <label for="secPerStop">Seconds per station stop</label>
-              <input type="number" id="secPerStop" name="secPerStop" min="0" step="10" value="150" inputmode="numeric">
-              <p class="field-hint">Docking, trading and launching at each station. Supercruise time to a station is estimated from its distance from the star.</p>
             </div>
           </div>
         </details>
