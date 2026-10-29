@@ -13,9 +13,10 @@ on:
   push:
     branches: [main, master]
   schedule:
-    # The Spansh dump is regenerated about daily. Twice a day is plenty; the build is skipped
-    # automatically (a cheap HEAD request) when the dump has not changed.
-    - cron: "15 6,18 * * *"
+    # Check every 2 hours. The Spansh dump only changes about once a day, so most checks find
+    # nothing new: the build is skipped (a cheap HEAD request) and the site is not redeployed.
+    # GitHub may delay scheduled runs by several minutes at busy times.
+    - cron: "15 */2 * * *"
   workflow_dispatch:
     inputs:
       refresh_data:
@@ -60,6 +61,8 @@ jobs:
     concurrency:
       group: refresh-trade-data
       cancel-in-progress: false
+    outputs:
+      changed: ${{ steps.publish.outputs.changed }}
     steps:
       - uses: actions/checkout@v4
 
@@ -104,11 +107,15 @@ jobs:
           fi
 
       - name: Publish to the data branch
+        id: publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          if [ ! -f out/trade-data.json ]; then exit 0; fi
+          if [ ! -f out/trade-data.json ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           cd out
           git init -q -b data
           git config user.name "trade-data-bot"
@@ -116,11 +123,13 @@ jobs:
           git add -A
           git commit -q -m "Trade data $(date -u +'%Y-%m-%d %H:%M UTC')"
           git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/data
+          echo "changed=true" >> "$GITHUB_OUTPUT"
 
   deploy:
     needs: [test, data]
     # Deploy after tests pass, whether or not the data job ran (it is skipped on plain pushes).
-    if: ${{ !cancelled() && needs.test.result == 'success' && needs.data.result != 'failure' }}
+    # On scheduled checks, only redeploy when new data was actually published.
+    if: ${{ !cancelled() && needs.test.result == 'success' && needs.data.result != 'failure' && (github.event_name != 'schedule' || needs.data.outputs.changed == 'true') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -146,7 +155,7 @@ jobs:
         run: |
           set -e
           mkdir _site
-          cp index.html style.css data.js optimizer.js engine.js worker.js app.js _site/
+          cp index.html style.css data.js optimizer.js live.js engine.js worker.js app.js _site/
           if [ -f _data/trade-data.json ]; then
             cp _data/trade-*.json _site/
             echo "Using published market data."
