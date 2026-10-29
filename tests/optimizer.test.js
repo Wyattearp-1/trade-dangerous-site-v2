@@ -15,9 +15,9 @@ function test(name, fn) {
 const COMMS = ['ALPHA', 'BETA', 'GAMMA', 'DELTA'];
 /** station spec: { key, system, pad?, flags?, updated?, rows: [[commodityIdx, buy, sell, supply, demand], ...] } */
 function makeData(systems, stations) {
-  const meta = { version: 2, commodities: COMMS, systems, generated_at: '2026-01-01T00:00:00Z' };
+  const meta = { version: 2, commodities: COMMS, systems, generated_at: new Date().toISOString() };
   const st = {};
-  for (const s of stations) st[s.key] = [s.pad || 'L', 0, s.flags || 0, s.updated || 0, [].concat(...s.rows)];
+  for (const s of stations) st[s.key] = [s.pad || 'L', s.ls || 0, s.flags || 0, s.updated || 0, [].concat(...s.rows)];
   return buildDataset(meta, [{ stations: st }]);
 }
 const base = {
@@ -162,6 +162,132 @@ test('quick trade reports the reverse direction when A->B loses money', () => {
   assert.ok(r.reverseProfit > 0);
 });
 
+
+test('price impact lowers profit on a big load, and k = 0 matches listed prices', () => {
+  const d = makeData({ X: [0, 0, 0], Y: [1, 0, 0] }, [
+    { key: 'X/ONE', system: 'X', rows: [[0, 100, 0, 100, 0]] },
+    { key: 'Y/TWO', system: 'Y', rows: [[0, 0, 200, 0, 100]] },
+  ]);
+  const o = Object.assign({}, base, { startKey: 'X/ONE', capacity: 100, credits: 1e6 });
+  assert.strictEqual(findRoutes(d, o).routes[0].totalProfit, 10000);
+  // k=0.5: marginal profit = 100 - 1.5 x, so the best load stops at ~67 units (profit ~3,333), not all 100 (2,500).
+  const imp = findRoutes(d, Object.assign({}, o, { impact: 0.5 })).routes[0];
+  assert.ok(imp.totalProfit >= 3300 && imp.totalProfit <= 3334, 'got ' + imp.totalProfit);
+  assert.ok(imp.hops[0].load[0].units >= 64 && imp.hops[0].load[0].units <= 70, 'stops buying once the margin is gone');
+  assert.ok(imp.hops[0].load[0].buyAvg > imp.hops[0].load[0].buy, 'average buy price is above the listed price');
+  assert.ok(imp.hops[0].load[0].sellAvg < imp.hops[0].load[0].sell, 'average sell price is below the listed price');
+  // small loads barely move the price
+  const small = findRoutes(d, Object.assign({}, o, { capacity: 2, impact: 0.5 })).routes[0].totalProfit;
+  assert.ok(small >= 190 && small <= 200, 'got ' + small);
+});
+
+test('real jump paths: a gap with no intermediate system is not reachable, a stepping stone is', () => {
+  const stations = [
+    { key: 'S/HOME', system: 'S', rows: [[0, 100, 0, 1e6, 0]] },
+    { key: 'T/FAR', system: 'T', rows: [[0, 0, 400, 0, 1e6]] },
+  ];
+  const o = Object.assign({}, base, { startKey: 'S/HOME', lyPer: 20, jumpsPer: 2 });
+  const gap = makeData({ S: [0, 0, 0], T: [30, 0, 0] }, stations);
+  assert.strictEqual(findRoutes(gap, Object.assign({}, o, { pathMode: 'line' })).routes.length, 1, 'straight-line says reachable');
+  assert.strictEqual(findRoutes(gap, Object.assign({}, o, { pathMode: 'graph' })).routes.length, 0, 'no star within 20 ly of both ends');
+  const bridged = makeData({ S: [0, 0, 0], M: [15, 0, 0], T: [30, 0, 0] }, stations);
+  const r = findRoutes(bridged, Object.assign({}, o, { pathMode: 'graph' })).routes[0];
+  assert.deepStrictEqual(r.hops[0].segments[0].path, ['S', 'M', 'T']);
+  assert.strictEqual(r.hops[0].jumps, 2);
+});
+
+test('credits-per-hour objective prefers a quick trade over a bigger but slower one', () => {
+  const d = makeData({ S: [0, 0, 0], N: [1, 0, 0], F: [2, 0, 0] }, [
+    { key: 'S/HOME', system: 'S', rows: [[0, 100, 0, 1e6, 0]] },
+    { key: 'N/NEAR', system: 'N', ls: 100, rows: [[0, 0, 400, 0, 1e6]] },       // +3000
+    { key: 'F/FAR', system: 'F', ls: 400000, rows: [[0, 0, 600, 0, 1e6]] },     // +5000, ~14 min supercruise
+  ]);
+  const o = Object.assign({}, base, { startKey: 'S/HOME', jumpsPer: 2 });
+  assert.strictEqual(findRoutes(d, o).routes[0].hops[0].to.key, 'F/FAR');
+  const r = findRoutes(d, Object.assign({}, o, { objective: 'rate' })).routes[0];
+  assert.strictEqual(r.hops[0].to.key, 'N/NEAR');
+  assert.ok(r.totalTime > 0 && r.profitPerHour > 0);
+});
+
+test('split cargo across two stops beats the best single stop when demand is small', () => {
+  const d = makeData({ S: [0, 0, 0], X: [3, 0, 0], Y: [6, 0, 0] }, [
+    { key: 'S/HOME', system: 'S', rows: [[0, 100, 0, 1e6, 0]] },
+    { key: 'X/HIGH', system: 'X', rows: [[0, 0, 300, 0, 4]] },      // pays 300 but only wants 4
+    { key: 'Y/LOW', system: 'Y', rows: [[0, 0, 200, 0, 100]] },     // pays 200, wants plenty
+  ]);
+  const o = Object.assign({}, base, { startKey: 'S/HOME', capacity: 10, jumpsPer: 2, credits: 1e6 });
+  assert.strictEqual(findRoutes(d, o).routes[0].totalProfit, 1000);
+  const r = findRoutes(d, Object.assign({}, o, { split: true })).routes[0];
+  assert.strictEqual(r.totalProfit, 1400); // 4 x 200 at X + 6 x 100 at Y
+  assert.strictEqual(r.hops[0].segments.length, 2);
+  const at0 = r.hops[0].load.filter((l) => l.at === 0).reduce((n, l) => n + l.units, 0);
+  const at1 = r.hops[0].load.filter((l) => l.at === 1).reduce((n, l) => n + l.units, 0);
+  assert.strictEqual(at0 + at1, 10);
+  assert.ok(at0 === 4 || at1 === 4, 'the 4 high-paying units are sold at the HIGH station');
+});
+
+
+test('repriceRoute re-plans with live prices, falling back to the snapshot where there is none', () => {
+  const { repriceRoute } = require('../optimizer.js');
+  const d = makeData({ S: [0, 0, 0], T: [5, 0, 0], U: [10, 0, 0] }, [
+    { key: 'S/HOME', system: 'S', rows: [[0, 100, 0, 1e6, 0]] },
+    { key: 'T/MID', system: 'T', rows: [[0, 0, 300, 0, 1e6], [1, 50, 0, 1e6, 0]] },
+    { key: 'U/END', system: 'U', rows: [[1, 0, 250, 0, 1e6]] },
+  ]);
+  const o = Object.assign({}, base, { startKey: 'S/HOME', hops: 2, jumpsPer: 1, lyPer: 6, capacity: 10, credits: 1e5 });
+  const route = findRoutes(d, o).routes[0];
+  assert.strictEqual(route.totalProfit, 2000 + 2000); // 10 x (300-100), then 10 x (250-50)
+  const ro = { capacity: 10, minProfitPerUnit: 1, impact: 0 };
+  // no live data at all: identical numbers, nothing marked live
+  const none = repriceRoute(d, route, {}, ro);
+  assert.strictEqual(none.totalProfit, route.totalProfit);
+  assert.strictEqual(none.live.checked, 0);
+  // live data for the middle station only: sell price crashed to 120, buy price for commodity 1 unchanged
+  const live = { 'T/MID': { rows: [['ALPHA', 0, 120, 0, 1e6], ['Beta', 50, 0, 1e6, 0]], updated: 1700000000 } };
+  const part = repriceRoute(d, route, live, ro);
+  assert.strictEqual(part.hops[0].profit, 200);   // 10 x (120-100)
+  assert.strictEqual(part.hops[1].profit, 2000);  // second leg still uses the snapshot for U/END
+  assert.strictEqual(part.totalProfit, 2200);
+  assert.strictEqual(part.snapshotProfit, 4000);
+  assert.strictEqual(part.live.checked, 1);
+  assert.strictEqual(part.live.total, 3);
+  assert.ok(part.hops[0].to.live === true && part.hops[1].from.live === true);
+  assert.strictEqual(part.hops[0].to.updated, 1700000000);
+  // the original route object is not modified
+  assert.strictEqual(route.totalProfit, 4000);
+});
+
+
+test('price age is measured as of the snapshot build time, not the current time', () => {
+  const built = Date.now() / 1000 - 10 * 86400;           // snapshot is 10 days old
+  const meta = { version: 2, commodities: COMMS, systems: { S: [0, 0, 0], N: [3, 0, 0], O: [4, 0, 0] }, generated_at: new Date(built * 1000).toISOString() };
+  const st = {
+    'S/HOME': ['L', 0, 0, built - 60, [0, 100, 0, 1e6, 0]],
+    'N/NEWISH': ['L', 0, 0, built - 3 * 3600, [0, 0, 300, 0, 1e6]],        // 3 h old when the snapshot was built
+    'O/STALE': ['L', 0, 0, built - 5 * 86400, [0, 0, 900, 0, 1e6]],         // 5 days old when it was built
+  };
+  const d = buildDataset(meta, [{ stations: st }]);
+  const r = findRoutes(d, Object.assign({}, base, { startKey: 'S/HOME', maxAgeHours: 24 }));
+  assert.strictEqual(r.routes.length, 1);
+  assert.strictEqual(r.routes[0].hops[0].to.key, 'N/NEWISH');
+});
+
+test('when filters remove most stations, the result says which filters and what to try', () => {
+  const now = Math.floor(Date.now() / 1000);
+  const systems = { S: [0, 0, 0] }; const rows = [{ key: 'S/HOME', system: 'S', updated: now, rows: [[0, 100, 0, 1e6, 0]] }];
+  for (let i = 0; i < 60; i++) { systems['K' + i] = [1 + i * 0.1, 0, 0]; rows.push({ key: 'K' + i + '/X', system: 'K' + i, pad: i % 3 ? 'S' : 'L', updated: now - 3 * 86400, rows: [[0, 0, 300, 0, 1e6]] }); }
+  const d = makeData(systems, rows);
+  const r = findRoutes(d, Object.assign({}, base, { startKey: 'S/HOME', jumpsPer: 5, maxAgeHours: 24, requirePad: 'L' }));
+  assert.strictEqual(r.stats.inReach, 60);
+  assert.strictEqual(r.stats.rejected.age, 60);
+  assert.ok(r.stats.rejected.pad > 30);
+  const msg = r.warnings.find((w) => /passed your filters/.test(w) && /Removed by/.test(w));
+  assert.ok(msg && /price age \(60\)/.test(msg) && /Max price age/.test(msg), msg);
+  // a healthy pool produces no such warning
+  const ok = findRoutes(d, Object.assign({}, base, { startKey: 'S/HOME', jumpsPer: 5 }));
+  assert.ok(!ok.warnings.some((w) => /Removed by/.test(w)));
+});
+
 async function asyncTests() {
   const dir = path.join(__dirname, '..');
   const fetched = [];
@@ -193,6 +319,100 @@ async function asyncTests() {
     await assert.rejects(() => engine.run(Object.assign({}, base, { startKey: 'NOPE/NOPE' })), /Unknown starting station/);
     passed++; console.log('  ok   unknown start station is rejected');
   } catch (e) { console.error('  FAIL unknown start\n       ' + e.stack); process.exitCode = 1; }
+
+  // Regression: a looser price-age limit must never score lower than a stricter one.
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const st = {}; const systems = { S: [0, 0, 0], G: [5, 0, 0], H: [10, 0, 0] };
+    const row = (c, b, se, sup, dem) => [c, b, se, sup, dem];
+    st['S/HOME'] = ['L', 0, 0, now, [].concat(row(0, 100, 0, 1e6, 0), row(1, 100, 0, 1e6, 0))];
+    // four STALE decoys: great first hop (+1000) but a dead end
+    for (let i = 0; i < 4; i++) { systems['D' + i] = [1 + i, 0, 0]; st['D' + i + '/X'] = ['L', 0, 0, now - 3 * 86400, [].concat(row(0, 0, 200, 0, 1e6))]; }
+    // fresh route: small first hop (+500) then a big second hop (+5000)
+    st['G/MID'] = ['L', 0, 0, now - 600, [].concat(row(1, 0, 150, 0, 1e6), row(2, 100, 0, 1e6, 0))];
+    st['H/END'] = ['L', 0, 0, now - 600, [].concat(row(2, 0, 600, 0, 1e6))];
+    const meta = { version: 2, commodities: ['A', 'B', 'C'], systems, shards: [{ file: 'x.json' }], generated_at: new Date().toISOString() };
+    const realFetch = global.fetch;
+    global.fetch = async (u) => new Response(JSON.stringify(u === 'meta.json' ? meta : { stations: st }), { status: 200 });
+    const e2 = createEngine();
+    await e2.load('meta.json', () => {});
+    global.fetch = realFetch;
+    const opts = Object.assign({}, base, { startKey: 'S/HOME', hops: 2, jumpsPer: 1, lyPer: 20, jumpsPer: 2, capacity: 10, widths: [2], maxResults: 3 });
+    const strict = await e2.run(Object.assign({}, opts, { maxAgeHours: 24 }));
+    const loose = await e2.run(Object.assign({}, opts, { maxAgeHours: 168 }));
+    assert.strictEqual(strict.routes[0].totalProfit, 5500, 'strict window finds the good route');
+    assert.ok(loose.routes[0].totalProfit >= strict.routes[0].totalProfit, 'looser window is never worse (got ' + loose.routes[0].totalProfit + ')');
+    passed++; console.log('  ok   looser price-age limit never scores lower than a stricter one');
+  } catch (e) { console.error('  FAIL age monotonic\n       ' + e.stack); process.exitCode = 1; }
+
+
+  // ---- live price service (mocked network)
+  try {
+    const live = require('../live.js');
+    live.reset();
+    // parsers
+    const edsm = live.parseEdsm({ name: 'Sol', sName: 'Abraham Lincoln', commodities: [{ id: 'gold', name: 'Gold', buyPrice: 9000, stock: 12, sellPrice: 8800, demand: 0 }], updateTime: { market: '2026-10-28 12:00:00' } });
+    assert.deepStrictEqual(edsm.rows[0], ['Gold', 9000, 8800, 12, 0]);
+    assert.strictEqual(edsm.updated, Date.UTC(2026, 9, 28, 12, 0, 0) / 1000);
+    assert.strictEqual(live.parseEdsm({}), null);
+    const ard = live.parseArdent([
+      { stationName: 'Abraham Lincoln', commodityName: 'Gold', buyPrice: 9100, sellPrice: 8900, stock: 5, demand: 1, updatedAt: '2026-10-28T12:30:00.000Z' },
+      { stationName: 'Other Port', commodityName: 'Gold', buyPrice: 1, sellPrice: 1, stock: 1, demand: 1 },
+    ], 'ABRAHAM LINCOLN');
+    assert.strictEqual(ard.rows.length, 1);
+    assert.strictEqual(ard.rows[0][1], 9100);
+    assert.strictEqual(live.parseArdent([], 'X'), null);
+    assert.strictEqual(live.titleCase("PICCARD'S FOLLY"), "Piccard's Folly");
+    assert.strictEqual(live.titleCase('LTT 6377/HUB-ONE'.split('/')[1]), 'Hub-One');
+
+    // lookups: first provider works, results are cached
+    let calls = 0;
+    const realFetch = global.fetch;
+    global.fetch = async (u) => {
+      calls++;
+      if (/edsm\.net/.test(u)) return new Response(JSON.stringify({ commodities: [{ name: 'Gold', buyPrice: 100, stock: 5, sellPrice: 90, demand: 5 }] }), { status: 200 });
+      return new Response('{}', { status: 404 });
+    };
+    const prog = [];
+    const out = await live.fetchMany(['SOL/ABRAHAM LINCOLN', 'SOL/GALILEO', 'SOL/ABRAHAM LINCOLN'], (d, t) => prog.push(d + '/' + t));
+    assert.strictEqual(Object.keys(out).length, 2);
+    assert.strictEqual(out['SOL/GALILEO'].provider, 'EDSM');
+    assert.strictEqual(prog[prog.length - 1], '2/2');
+    const before = calls;
+    await live.fetchMany(['SOL/ABRAHAM LINCOLN']);
+    assert.strictEqual(calls, before, 'second lookup is served from the cache');
+
+    // failure: falls back to the second provider, then to null; never throws
+    live.reset();
+    global.fetch = async (u) => {
+      if (/edsm\.net/.test(u)) throw new TypeError('Failed to fetch');
+      return new Response(JSON.stringify([{ stationName: 'Galileo', commodityName: 'Gold', buyPrice: 7, sellPrice: 6, stock: 1, demand: 1 }]), { status: 200 });
+    };
+    const viaArdent = await live.fetchStation('SOL/GALILEO');
+    assert.strictEqual(viaArdent.provider, 'Ardent');
+    live.reset();
+    global.fetch = async () => { throw new TypeError('Failed to fetch'); };
+    assert.strictEqual(await live.fetchStation('SOL/GALILEO'), null);
+    assert.ok(/Failed to fetch/.test(live.lastError));
+    // rate limited: pauses further lookups
+    live.reset();
+    let rl = 0;
+    global.fetch = async () => { rl++; return new Response('', { status: 429 }); };
+    assert.strictEqual(await live.fetchStation('SOL/A'), null);
+    const rlCalls = rl;
+    assert.strictEqual(await live.fetchStation('SOL/B'), null);
+    assert.strictEqual(rl, rlCalls, 'no more requests while paused after HTTP 429');
+    // self test reports per provider
+    live.reset();
+    global.fetch = async (u) => (/edsm\.net/.test(u) ? new Response(JSON.stringify({ commodities: [{ name: 'Gold', buyPrice: 1, stock: 1, sellPrice: 1, demand: 1 }] }), { status: 200 }) : new Response('', { status: 500 }));
+    const st = await live.selfTest();
+    assert.strictEqual(st.length, 2);
+    assert.strictEqual(st[0].ok, true);
+    assert.strictEqual(st[1].ok, false);
+    global.fetch = realFetch;
+    live.reset();
+    passed++; console.log('  ok   live price service: parsing, caching, fallback, rate-limit pause, self test');
+  } catch (e) { console.error('  FAIL live service\n       ' + e.stack); process.exitCode = 1; }
 
   try {
     const { tilesNear } = require('../data.js');
